@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Dtls;
 using Dtls.Transport;
@@ -58,6 +59,14 @@ public sealed class ServerRoutingTests
                 // ServerCertificate (it is configured for raw public keys, which Schannel
                 // does not support), so the backend rejects it with a DtlsException. That the
                 // request reached the native backend at all proves the routing decision.
+                await Assert.ThrowsAnyAsync<DtlsException>(
+                    async () => await dtlsServer.AcceptAsync(server));
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                // The OpenSSL native backend is implemented on Linux. This server has no
+                // ServerCertificate, so OpenSSL fails the handshake (no shared cipher) and the
+                // backend surfaces a DtlsException. Reaching the backend proves the routing.
                 await Assert.ThrowsAnyAsync<DtlsException>(
                     async () => await dtlsServer.AcceptAsync(server));
             }
