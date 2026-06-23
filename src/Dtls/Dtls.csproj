@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.1;net8.0;net9.0;net10.0</TargetFrameworks>
+    <RootNamespace>Dtls</RootNamespace>
+    <AssemblyName>Dtls</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Packaging -->
+    <PackageId>Dtls</PackageId>
+    <Description>Cross-platform DTLS 1.0/1.2/1.3 for .NET using the host OS cryptography.</Description>
+    <Authors>marcschier</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <!-- NativeAOT compatibility is required on net10 only. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Dtls.UnitTests" />
+    <InternalsVisibleTo Include="Dtls.IntegrationTests" />
+  </ItemGroup>
+
+</Project>

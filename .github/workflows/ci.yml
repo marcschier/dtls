@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+  CI: 'true'
+
+jobs:
+  lint:
+    name: Format & line length
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - name: Restore
+        run: dotnet restore Dtls.slnx
+      - name: Verify formatting
+        run: dotnet format Dtls.slnx --verify-no-changes --severity warn
+      - name: Check line length (<= 100 columns)
+        shell: pwsh
+        run: ./eng/check-line-length.ps1
+
+  build-test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - name: OpenSSL version (interop dependency)
+        shell: bash
+        run: openssl version
+      - name: Restore
+        run: dotnet restore Dtls.slnx
+      - name: Build
+        run: dotnet build Dtls.slnx -c Release --no-restore
+      - name: Unit tests
+        run: dotnet test tests/Dtls.UnitTests/Dtls.UnitTests.csproj -c Release --no-build
+      - name: Integration tests
+        run: dotnet test tests/Dtls.IntegrationTests/Dtls.IntegrationTests.csproj -c Release --no-build
+      - name: Interop tests (vs OpenSSL)
+        run: dotnet test tests/Dtls.Interop.Tests/Dtls.Interop.Tests.csproj -c Release --no-build

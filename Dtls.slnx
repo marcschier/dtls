@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/Dtls.EchoClient/Dtls.EchoClient.csproj" />
+    <Project Path="samples/Dtls.EchoServer/Dtls.EchoServer.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Dtls/Dtls.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Dtls.IntegrationTests/Dtls.IntegrationTests.csproj" />
+    <Project Path="tests/Dtls.Interop.Tests/Dtls.Interop.Tests.csproj" />
+    <Project Path="tests/Dtls.UnitTests/Dtls.UnitTests.csproj" />
+  </Folder>
+</Solution>

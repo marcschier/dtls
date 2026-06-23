@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Dtls\Dtls.csproj" />
+  </ItemGroup>
+
+  <!-- Reuse the ClientHello builder from the unit tests instead of duplicating it. -->
+  <ItemGroup>
+    <Compile Include="..\Dtls.UnitTests\DtlsMessageBuilder.cs" Link="DtlsMessageBuilder.cs" />
+  </ItemGroup>
+
+</Project>
