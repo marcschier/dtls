@@ -71,6 +71,8 @@ internal static class Dtls13ServerHandshake
                     emitCertificateTypeExtension,
                     serverConnectionId,
                     clientConnectionId,
+                    options.RequireClientCertificate,
+                    options.ClientCertificateValidation,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -265,6 +267,8 @@ internal static class Dtls13ServerHandshake
         bool emitCertificateTypeExtension,
         byte[] serverConnectionId,
         byte[] clientConnectionId,
+        bool requireClientCertificate,
+        DtlsRemoteCertificateValidation? clientCertificateValidation,
         CancellationToken cancellationToken)
     {
         SignatureScheme scheme = SelectSignatureScheme(clientHello, certificate);
@@ -314,6 +318,14 @@ internal static class Dtls13ServerHandshake
                 certificateType, emitCertificateTypeExtension);
             transcript.AppendMessage(HandshakeType.EncryptedExtensions, encryptedExtensionsBody);
 
+            byte[]? certificateRequestBody = null;
+            if (requireClientCertificate)
+            {
+                certificateRequestBody = CertificateRequestMessage.Encode(ClientCertificateSchemes);
+                transcript.AppendMessage(
+                    HandshakeType.CertificateRequest, certificateRequestBody);
+            }
+
             byte[] certificateData = certificateType == CertificateType.RawPublicKey
                 ? RawPublicKey.ExportSubjectPublicKeyInfo(certificate)
                 : certificate.RawData;
@@ -334,6 +346,7 @@ internal static class Dtls13ServerHandshake
             byte[] flight = BuildCertificateServerFlight(
                 sendHandshake,
                 encryptedExtensionsBody,
+                certificateRequestBody,
                 certificateBody,
                 certificateVerifyBody,
                 serverFinished);
@@ -349,14 +362,29 @@ internal static class Dtls13ServerHandshake
             secrets.Add(clientAp);
             secrets.Add(serverAp);
 
-            await ReceiveAndVerifyClientFinishedAsync(
-                    transport,
-                    recvHandshake,
-                    hash,
-                    clientHsSecret,
-                    transcriptChSf,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            if (requireClientCertificate)
+            {
+                await ReceiveAndVerifyClientAuthAsync(
+                        transport,
+                        recvHandshake,
+                        hash,
+                        clientHsSecret,
+                        transcript,
+                        clientCertificateValidation,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await ReceiveAndVerifyClientFinishedAsync(
+                        transport,
+                        recvHandshake,
+                        hash,
+                        clientHsSecret,
+                        transcriptChSf,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
             return CreateServerConnection(
                 transport, suite, serverAp, clientAp, serverConnectionId, clientConnectionId);
@@ -375,38 +403,158 @@ internal static class Dtls13ServerHandshake
     private static byte[] BuildCertificateServerFlight(
         Dtls13RecordProtector protector,
         byte[] encryptedExtensionsBody,
+        byte[]? certificateRequestBody,
         byte[] certificateBody,
         byte[] certificateVerifyBody,
         byte[] serverFinished)
     {
-        byte[] eeMessage = HandshakeMessage.Serialize(
-            HandshakeType.EncryptedExtensions, 1, encryptedExtensionsBody);
-        byte[] certificateMessage = HandshakeMessage.Serialize(
-            HandshakeType.Certificate, 2, certificateBody);
-        byte[] certificateVerifyMessage = HandshakeMessage.Serialize(
-            HandshakeType.CertificateVerify, 3, certificateVerifyBody);
-        byte[] finishedMessage = HandshakeMessage.Serialize(
-            HandshakeType.Finished, 4, serverFinished);
+        List<byte[]> records = new();
+        ushort messageSequence = 1;
+        ulong recordSequence = 0;
 
-        byte[] eeRecord = Dtls13HandshakeRecords.SealHandshakeRecord(protector, 0, eeMessage);
-        byte[] certificateRecord = Dtls13HandshakeRecords.SealHandshakeRecord(
-            protector, 1, certificateMessage);
-        byte[] certificateVerifyRecord = Dtls13HandshakeRecords.SealHandshakeRecord(
-            protector, 2, certificateVerifyMessage);
-        byte[] finishedRecord = Dtls13HandshakeRecords.SealHandshakeRecord(
-            protector, 3, finishedMessage);
+        void Add(HandshakeType type, byte[] body)
+        {
+            byte[] message = HandshakeMessage.Serialize(type, messageSequence, body);
+            records.Add(Dtls13HandshakeRecords.SealHandshakeRecord(
+                protector, recordSequence, message));
+            messageSequence++;
+            recordSequence++;
+        }
 
-        byte[] flight = new byte[eeRecord.Length + certificateRecord.Length
-            + certificateVerifyRecord.Length + finishedRecord.Length];
+        Add(HandshakeType.EncryptedExtensions, encryptedExtensionsBody);
+        if (certificateRequestBody is not null)
+        {
+            Add(HandshakeType.CertificateRequest, certificateRequestBody);
+        }
+
+        Add(HandshakeType.Certificate, certificateBody);
+        Add(HandshakeType.CertificateVerify, certificateVerifyBody);
+        Add(HandshakeType.Finished, serverFinished);
+
+        int total = 0;
+        foreach (byte[] record in records)
+        {
+            total += record.Length;
+        }
+
+        byte[] flight = new byte[total];
         int offset = 0;
-        eeRecord.CopyTo(flight, offset);
-        offset += eeRecord.Length;
-        certificateRecord.CopyTo(flight, offset);
-        offset += certificateRecord.Length;
-        certificateVerifyRecord.CopyTo(flight, offset);
-        offset += certificateVerifyRecord.Length;
-        finishedRecord.CopyTo(flight, offset);
+        foreach (byte[] record in records)
+        {
+            record.CopyTo(flight, offset);
+            offset += record.Length;
+        }
+
         return flight;
+    }
+
+    private static readonly SignatureScheme[] ClientCertificateSchemes =
+    {
+        SignatureScheme.EcdsaSecp256r1Sha256,
+        SignatureScheme.EcdsaSecp384r1Sha384,
+        SignatureScheme.RsaPssRsaeSha256,
+        SignatureScheme.RsaPssRsaeSha384,
+    };
+
+    private static async Task ReceiveAndVerifyClientAuthAsync(
+        IDatagramTransport transport,
+        Dtls13RecordProtector recvHandshake,
+        HashAlgorithmName hash,
+        byte[] clientHsSecret,
+        TranscriptHash transcript,
+        DtlsRemoteCertificateValidation? clientCertificateValidation,
+        CancellationToken cancellationToken)
+    {
+        byte[] datagram = await ReceiveDatagramAsync(transport, cancellationToken)
+            .ConfigureAwait(false);
+        List<Dtls13HandshakeRecords.Message> flight =
+            Dtls13HandshakeRecords.OpenHandshakeFlight(datagram, recvHandshake);
+
+        if (flight.Count < 2 || flight[0].Type != HandshakeType.Certificate)
+        {
+            throw new DtlsException("Expected the client Certificate message.");
+        }
+
+        if (!CertificateMessage.TryParse(
+                flight[0].Body, out _, out List<byte[]> certificateEntries))
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.DecodeError, true, "The client Certificate message was malformed.");
+        }
+
+        if (certificateEntries.Count == 0)
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.HandshakeFailure,
+                true,
+                "The server requires a client certificate, but none was provided.");
+        }
+
+        transcript.AppendMessage(HandshakeType.Certificate, flight[0].Body);
+        byte[] transcriptThroughClientCert = transcript.CurrentHash();
+
+        if (flight.Count < 3 || flight[1].Type != HandshakeType.CertificateVerify)
+        {
+            throw new DtlsException("Expected the client CertificateVerify message.");
+        }
+
+        if (!CertificateVerifyMessage.TryParse(
+                flight[1].Body, out SignatureScheme scheme, out byte[] signature))
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.DecodeError,
+                true,
+                "The client CertificateVerify message was malformed.");
+        }
+
+        using (X509Certificate2 clientCertificate = LoadCertificate(certificateEntries[0]))
+        {
+            if (!CertificateVerifySigner.Verify(
+                    clientCertificate,
+                    scheme,
+                    transcriptThroughClientCert,
+                    signature,
+                    clientContext: true))
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.DecryptError,
+                    true,
+                    "The client CertificateVerify did not verify.");
+            }
+
+            if (clientCertificateValidation is { } validate
+                && !validate(clientCertificate, null, true))
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.BadCertificate,
+                    true,
+                    "The client certificate was rejected by the validation callback.");
+            }
+        }
+
+        transcript.AppendMessage(HandshakeType.CertificateVerify, flight[1].Body);
+        byte[] transcriptThroughClientCv = transcript.CurrentHash();
+
+        if (flight.Count < 3 || flight[2].Type != HandshakeType.Finished)
+        {
+            throw new DtlsException("Expected the client Finished message.");
+        }
+
+        if (!Dtls13KeySchedule.VerifyFinished(
+                hash, clientHsSecret, transcriptThroughClientCv, flight[2].Body))
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.DecryptError, true, "The client Finished did not verify.");
+        }
+    }
+
+    private static X509Certificate2 LoadCertificate(byte[] der)
+    {
+#if NET9_0_OR_GREATER
+        return X509CertificateLoader.LoadCertificate(der);
+#else
+        return new X509Certificate2(der);
+#endif
     }
 
     private static async Task ReceiveAndVerifyClientFinishedAsync(

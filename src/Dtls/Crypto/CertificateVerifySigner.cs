@@ -23,6 +23,7 @@ namespace Dtls.Crypto;
 internal static class CertificateVerifySigner
 {
     private const string ServerContextString = "TLS 1.3, server CertificateVerify";
+    private const string ClientContextString = "TLS 1.3, client CertificateVerify";
     private const int ContextPadLength = 64;
 
     /// <summary>
@@ -92,14 +93,15 @@ internal static class CertificateVerifySigner
     public static byte[] Sign(
         X509Certificate2 certificate,
         SignatureScheme scheme,
-        ReadOnlySpan<byte> transcriptHash)
+        ReadOnlySpan<byte> transcriptHash,
+        bool clientContext = false)
     {
         if (certificate is null)
         {
             throw new ArgumentNullException(nameof(certificate));
         }
 
-        byte[] content = BuildSignedContent(transcriptHash);
+        byte[] content = BuildSignedContent(transcriptHash, clientContext);
         try
         {
             HashAlgorithmName hashAlgorithm = HashFor(scheme);
@@ -135,7 +137,8 @@ internal static class CertificateVerifySigner
         X509Certificate2 certificate,
         SignatureScheme scheme,
         ReadOnlySpan<byte> transcriptHash,
-        ReadOnlySpan<byte> signature)
+        ReadOnlySpan<byte> signature,
+        bool clientContext = false)
     {
         if (certificate is null)
         {
@@ -145,11 +148,11 @@ internal static class CertificateVerifySigner
         if (IsEcdsa(scheme))
         {
             using ECDsa? key = certificate.GetECDsaPublicKey();
-            return key is not null && Verify(key, scheme, transcriptHash, signature);
+            return key is not null && Verify(key, scheme, transcriptHash, signature, clientContext);
         }
 
         using RSA? rsa = certificate.GetRSAPublicKey();
-        return rsa is not null && Verify(rsa, scheme, transcriptHash, signature);
+        return rsa is not null && Verify(rsa, scheme, transcriptHash, signature, clientContext);
     }
 
     /// <summary>
@@ -162,14 +165,15 @@ internal static class CertificateVerifySigner
         AsymmetricAlgorithm publicKey,
         SignatureScheme scheme,
         ReadOnlySpan<byte> transcriptHash,
-        ReadOnlySpan<byte> signature)
+        ReadOnlySpan<byte> signature,
+        bool clientContext = false)
     {
         if (publicKey is null)
         {
             throw new ArgumentNullException(nameof(publicKey));
         }
 
-        byte[] content = BuildSignedContent(transcriptHash);
+        byte[] content = BuildSignedContent(transcriptHash, clientContext);
         try
         {
             HashAlgorithmName hashAlgorithm = HashFor(scheme);
@@ -202,9 +206,10 @@ internal static class CertificateVerifySigner
         }
     }
 
-    private static byte[] BuildSignedContent(ReadOnlySpan<byte> transcriptHash)
+    private static byte[] BuildSignedContent(ReadOnlySpan<byte> transcriptHash, bool clientContext)
     {
-        byte[] context = Encoding.ASCII.GetBytes(ServerContextString);
+        byte[] context = Encoding.ASCII.GetBytes(
+            clientContext ? ClientContextString : ServerContextString);
         byte[] content = new byte[ContextPadLength + context.Length + 1 + transcriptHash.Length];
         Span<byte> span = content;
         span.Slice(0, ContextPadLength).Fill(0x20);
