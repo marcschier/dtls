@@ -70,6 +70,14 @@ public sealed class ServerRoutingTests
                 await Assert.ThrowsAnyAsync<DtlsException>(
                     async () => await dtlsServer.AcceptAsync(server));
             }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                // The Secure Transport native backend is implemented on macOS. This server has
+                // no ServerCertificate, so the backend rejects it with a DtlsException; reaching
+                // the backend proves the routing decision.
+                await Assert.ThrowsAnyAsync<DtlsException>(
+                    async () => await dtlsServer.AcceptAsync(server));
+            }
             else
             {
                 NotImplementedException ex = await Assert.ThrowsAsync<NotImplementedException>(

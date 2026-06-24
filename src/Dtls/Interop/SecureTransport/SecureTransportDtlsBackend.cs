@@ -8,10 +8,12 @@ using Dtls.Transport;
 namespace Dtls.Interop.SecureTransport;
 
 /// <summary>
-/// macOS DTLS 1.0/1.2 backend that delegates to Apple's Secure Transport via P/Invoke.
-/// Implementation is pending (plan phase 3): it will use
-/// <c>SSLCreateContext(kSSLDatagramType)</c> with read/write callbacks. Secure Transport is
-/// deprecated by Apple; a Network.framework backend is tracked as future work.
+/// macOS DTLS 1.2 backend that delegates the handshake and record protection to Apple's
+/// Secure Transport (<c>Security.framework</c>) via P/Invoke. It drives an
+/// <c>SSLCreateContext(kSSLDatagramType)</c> session through read/write I/O callbacks:
+/// inbound datagrams are handed to Secure Transport via the read callback and outbound records
+/// are queued by the write callback and flushed as datagrams over the transport. Secure
+/// Transport is deprecated by Apple; a Network.framework backend is tracked as future work.
 /// </summary>
 internal sealed class SecureTransportDtlsBackend : INativeDtlsBackend
 {
@@ -24,7 +26,16 @@ internal sealed class SecureTransportDtlsBackend : INativeDtlsBackend
         DtlsClientOptions options,
         CancellationToken cancellationToken)
     {
-        throw NotYetImplemented.Feature("The Secure Transport DTLS 1.0/1.2 client backend");
+#if NET8_0_OR_GREATER
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            throw NotYetImplemented.Feature("The Secure Transport DTLS 1.2 client backend");
+        }
+
+        return SecureTransportDtlsConnection.ConnectAsync(transport, options, cancellationToken);
+#else
+        throw NotYetImplemented.Feature("The Secure Transport DTLS 1.2 client backend");
+#endif
     }
 
     public Task<DtlsConnection> AcceptAsync(
@@ -33,6 +44,16 @@ internal sealed class SecureTransportDtlsBackend : INativeDtlsBackend
         ReadOnlyMemory<byte> initialDatagram,
         CancellationToken cancellationToken)
     {
-        throw NotYetImplemented.Feature("The Secure Transport DTLS 1.0/1.2 server backend");
+#if NET8_0_OR_GREATER
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            throw NotYetImplemented.Feature("The Secure Transport DTLS 1.2 server backend");
+        }
+
+        return SecureTransportDtlsConnection.AcceptAsync(
+            transport, options, initialDatagram, cancellationToken);
+#else
+        throw NotYetImplemented.Feature("The Secure Transport DTLS 1.2 server backend");
+#endif
     }
 }
