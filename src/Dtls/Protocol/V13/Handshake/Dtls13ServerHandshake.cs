@@ -19,9 +19,11 @@ namespace Dtls.Protocol.V13.Handshake;
 /// an established connection.
 /// </summary>
 /// <remarks>
-/// Deferred (not implemented here): HelloRetryRequest cookies, mutual (client) certificate
-/// authentication, handshake fragmentation across datagrams, retransmission, Connection ID,
-/// KeyUpdate, and 0-RTT.
+/// On the certificate path the server can request client authentication
+/// (<see cref="DtlsServerOptions.RequireClientCertificate"/>) and perform a stateless
+/// HelloRetryRequest cookie exchange (<see cref="DtlsServerOptions.EnableStatelessRetry"/>).
+/// Deferred (not implemented here): handshake fragmentation across datagrams, retransmission,
+/// and 0-RTT. The external-PSK path does not emit a HelloRetryRequest.
 /// </remarks>
 internal static class Dtls13ServerHandshake
 {
@@ -55,6 +57,25 @@ internal static class Dtls13ServerHandshake
 
         if (UseCertificate(options, clientHello))
         {
+            byte[]? transcriptPrefix = null;
+            if (options.EnableStatelessRetry)
+            {
+                HelloRetryExchange retry = await RunStatelessHelloRetryAsync(
+                        transport,
+                        clientHello,
+                        clientHelloBody,
+                        suite,
+                        group,
+                        serverConnectionId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                clientHello = retry.ClientHello;
+                clientHelloBody = retry.ClientHelloBody;
+                clientKeyShare = retry.ClientKeyShare;
+                group = retry.Group;
+                transcriptPrefix = retry.TranscriptPrefix;
+            }
+
             CertificateType certificateType = SelectServerCertificateType(
                 options, clientHello, out bool emitCertificateTypeExtension);
 
@@ -73,6 +94,7 @@ internal static class Dtls13ServerHandshake
                     clientConnectionId,
                     options.RequireClientCertificate,
                     options.ClientCertificateValidation,
+                    transcriptPrefix,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -90,6 +112,208 @@ internal static class Dtls13ServerHandshake
                 clientConnectionId,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private sealed class HelloRetryExchange
+    {
+        public HelloRetryExchange(
+            ClientHello clientHello,
+            byte[] clientHelloBody,
+            byte[] clientKeyShare,
+            NamedGroup group,
+            byte[] transcriptPrefix)
+        {
+            ClientHello = clientHello;
+            ClientHelloBody = clientHelloBody;
+            ClientKeyShare = clientKeyShare;
+            Group = group;
+            TranscriptPrefix = transcriptPrefix;
+        }
+
+        public ClientHello ClientHello { get; }
+
+        public byte[] ClientHelloBody { get; }
+
+        public byte[] ClientKeyShare { get; }
+
+        public NamedGroup Group { get; }
+
+        public byte[] TranscriptPrefix { get; }
+    }
+
+    /// <summary>
+    /// Runs a stateless HelloRetryRequest round (RFC 9147 section 5.1): the server emits an
+    /// HRR carrying an authenticated cookie (and, when the client offered an additional group
+    /// without a key_share, a request for that group), then receives and validates the second
+    /// ClientHello. Returns the second ClientHello together with the synthetic
+    /// <c>message_hash</c> + HelloRetryRequest transcript prefix (RFC 8446 section 4.4.1).
+    /// </summary>
+    private static async Task<HelloRetryExchange> RunStatelessHelloRetryAsync(
+        IDatagramTransport transport,
+        ClientHello clientHello1,
+        byte[] clientHello1Body,
+        Dtls13CipherSuite suite,
+        NamedGroup group,
+        byte[] serverConnectionId,
+        CancellationToken cancellationToken)
+    {
+        HashAlgorithmName hash = suite.HashAlgorithm;
+        byte[] clientHello1Reconstructed = HandshakeMessage.ToTranscriptBytes(
+            HandshakeType.ClientHello, clientHello1Body);
+
+        byte[] clientHello1Hash;
+        using (IncrementalHash digest = IncrementalHash.CreateHash(hash))
+        {
+            digest.AppendData(clientHello1Reconstructed);
+            clientHello1Hash = digest.GetHashAndReset();
+        }
+
+        // Prefer changing the client to an offered-but-unshared group (so the HelloRetryRequest
+        // also corrects the key_share); otherwise fall back to a cookie-only retry that keeps
+        // the originally selected group.
+        bool changeGroup = TrySelectUnsharedGroup(clientHello1, out NamedGroup retryGroup);
+        NamedGroup expectedGroup = changeGroup ? retryGroup : group;
+
+        byte[] macKey = new byte[32];
+        RandomNumberGenerator.Fill(macKey);
+        try
+        {
+            byte[] cookie = HelloRetryCookie.Build(macKey, expectedGroup, clientHello1Hash);
+            byte[] helloRetryBody = BuildHelloRetryRequestBody(
+                suite, changeGroup ? expectedGroup : (NamedGroup?)null, cookie, serverConnectionId);
+
+            byte[] helloRetryMessage = HandshakeMessage.Serialize(
+                HandshakeType.ServerHello, 0, helloRetryBody);
+            byte[] helloRetryRecord = Dtls13PlaintextRecord.Encode(
+                Dtls13PlaintextRecord.HandshakeContentType, 0, 0, helloRetryMessage);
+            await transport.SendAsync(helloRetryRecord, cancellationToken).ConfigureAwait(false);
+
+            byte[] clientHello2Datagram = await ReceiveDatagramAsync(transport, cancellationToken)
+                .ConfigureAwait(false);
+            if (!Dtls13HandshakeRecords.TryReadPlaintextHandshake(
+                    clientHello2Datagram, out HandshakeType ch2Type, out byte[] clientHello2Body)
+                || ch2Type != HandshakeType.ClientHello
+                || !ClientHello.TryParse(clientHello2Body, out ClientHello clientHello2))
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.DecodeError,
+                    true,
+                    "Expected a second ClientHello after the HelloRetryRequest.");
+            }
+
+            if (!ExtensionList.TryFind(
+                    clientHello2.Extensions, ExtensionType.Cookie, out HandshakeExtension cookieExt)
+                || !CookieExtension.TryParse(cookieExt.Data, out byte[] echoed)
+                || !HelloRetryCookie.TryOpen(
+                    macKey, echoed, out NamedGroup cookieGroup, out byte[] cookieHash)
+                || cookieGroup != expectedGroup
+                || !CryptographicOperations.FixedTimeEquals(cookieHash, clientHello1Hash))
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.HandshakeFailure,
+                    true,
+                    "The HelloRetryRequest cookie was missing or invalid.");
+            }
+
+            NamedGroup group2 = SelectGroup(clientHello2, out byte[] clientKeyShare2);
+            if (group2 != expectedGroup)
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.IllegalParameter,
+                    true,
+                    "The second ClientHello did not use the HelloRetryRequest group.");
+            }
+
+            byte[] messageHash = TranscriptHash.SynthesizeMessageHash(
+                hash, clientHello1Reconstructed);
+            byte[] helloRetryTranscript = HandshakeMessage.ToTranscriptBytes(
+                HandshakeType.ServerHello, helloRetryBody);
+            byte[] transcriptPrefix = new byte[messageHash.Length + helloRetryTranscript.Length];
+            messageHash.CopyTo(transcriptPrefix, 0);
+            helloRetryTranscript.CopyTo(transcriptPrefix, messageHash.Length);
+
+            return new HelloRetryExchange(
+                clientHello2, clientHello2Body, clientKeyShare2, expectedGroup, transcriptPrefix);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(macKey);
+        }
+    }
+
+    /// <summary>
+    /// Finds the first mutually supported group the client offered in supported_groups but did
+    /// not provide a key_share for. Used to drive a HelloRetryRequest that also corrects the
+    /// client's key_share (RFC 8446 section 4.1.4).
+    /// </summary>
+    private static bool TrySelectUnsharedGroup(ClientHello clientHello, out NamedGroup group)
+    {
+        group = default;
+
+        if (!ExtensionList.TryFind(
+                clientHello.Extensions,
+                ExtensionType.SupportedGroups,
+                out HandshakeExtension groupsExt)
+            || !SupportedGroupsExtension.TryParse(groupsExt.Data, out List<NamedGroup> groups))
+        {
+            return false;
+        }
+
+        HashSet<NamedGroup> shared = new();
+        if (ExtensionList.TryFind(
+                clientHello.Extensions, ExtensionType.KeyShare, out HandshakeExtension keyShareExt)
+            && KeyShareExtension.TryParseClientHello(
+                keyShareExt.Data, out List<KeyShareEntry> shares))
+        {
+            foreach (KeyShareEntry entry in shares)
+            {
+                shared.Add(entry.Group);
+            }
+        }
+
+        foreach (NamedGroup candidate in groups)
+        {
+            if (EcdheKeyExchange.IsSupported(candidate) && !shared.Contains(candidate))
+            {
+                group = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static byte[] BuildHelloRetryRequestBody(
+        Dtls13CipherSuite suite,
+        NamedGroup? selectedGroup,
+        byte[] cookie,
+        byte[] serverConnectionId)
+    {
+        List<HandshakeExtension> extensions = new()
+        {
+            new HandshakeExtension(
+                ExtensionType.SupportedVersions,
+                SupportedVersionsExtension.EncodeServerHello(DtlsWireVersion.Dtls13)),
+        };
+
+        if (selectedGroup is { } group)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.KeyShare, KeyShareExtension.EncodeHelloRetryRequest(group)));
+        }
+
+        extensions.Add(new HandshakeExtension(
+            ExtensionType.Cookie, CookieExtension.Encode(cookie)));
+
+        AddConnectionIdExtension(extensions, serverConnectionId);
+
+        ServerHello helloRetryRequest = new()
+        {
+            Random = ServerHello.HelloRetryRequestRandom.ToArray(),
+            CipherSuite = suite.Id,
+            Extensions = extensions,
+        };
+        return helloRetryRequest.Encode();
     }
 
     private static (byte[] ServerCid, byte[] ClientCid) NegotiateConnectionId(
@@ -269,6 +493,7 @@ internal static class Dtls13ServerHandshake
         byte[] clientConnectionId,
         bool requireClientCertificate,
         DtlsRemoteCertificateValidation? clientCertificateValidation,
+        byte[]? transcriptPrefix,
         CancellationToken cancellationToken)
     {
         SignatureScheme scheme = SelectSignatureScheme(clientHello, certificate);
@@ -280,6 +505,11 @@ internal static class Dtls13ServerHandshake
         try
         {
             TranscriptHash transcript = new(hash);
+            if (transcriptPrefix is not null)
+            {
+                transcript.AppendRaw(transcriptPrefix);
+            }
+
             transcript.AppendMessage(HandshakeType.ClientHello, clientHelloBody);
 
             byte[] early = Dtls13KeySchedule.EarlySecret(hash, ReadOnlySpan<byte>.Empty);

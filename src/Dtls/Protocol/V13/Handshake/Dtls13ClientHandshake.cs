@@ -18,9 +18,10 @@ namespace Dtls.Protocol.V13.Handshake;
 /// ClientHello, processes the server flight, and sends its own Finished.
 /// </summary>
 /// <remarks>
-/// Deferred (not implemented here): HelloRetryRequest cookies, client (mutual) certificate
-/// authentication, handshake fragmentation across datagrams, retransmission, Connection ID,
-/// KeyUpdate, and 0-RTT.
+/// On the certificate path the client also answers a CertificateRequest (mutual authentication,
+/// RFC 8446 section 4.3.2) and a HelloRetryRequest (cookie and/or group change, section 4.1.4).
+/// Deferred (not implemented here): handshake fragmentation across datagrams, retransmission,
+/// and 0-RTT. External-PSK handshakes do not support HelloRetryRequest.
 /// </remarks>
 internal static class Dtls13ClientHandshake
 {
@@ -30,6 +31,16 @@ internal static class Dtls13ClientHandshake
         SignatureScheme.EcdsaSecp384r1Sha384,
         SignatureScheme.RsaPssRsaeSha256,
         SignatureScheme.RsaPssRsaeSha384,
+    };
+
+    // The certificate path advertises all managed (EC)DHE groups but sends a key_share only for
+    // the first; the server may answer with a HelloRetryRequest selecting another (RFC 8446
+    // section 4.1.4).
+    private static readonly NamedGroup[] CertificateOfferedGroups =
+    {
+        NamedGroup.Secp256r1,
+        NamedGroup.Secp384r1,
+        NamedGroup.Secp521r1,
     };
 
     public static Task<DtlsConnection> RunAsync(
@@ -99,6 +110,12 @@ internal static class Dtls13ClientHandshake
 
             (ServerHello serverHello, byte[] serverHelloBody) =
                 await ReceiveServerHelloAsync(transport, cancellationToken).ConfigureAwait(false);
+            if (serverHello.IsHelloRetryRequest)
+            {
+                throw new DtlsException(
+                    "HelloRetryRequest is not supported with the external-PSK handshake.");
+            }
+
             suite = ResolveServerSuite(serverHello, offered);
             transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
@@ -189,10 +206,10 @@ internal static class Dtls13ClientHandshake
         // hashes allowed) is offered and the transcript hash is chosen after the ServerHello.
         IReadOnlyList<Dtls13CipherSuite> offered = CipherSuitePolicy.Resolve(options.CipherSuites);
         ushort[] offeredIds = ToCipherSuiteIds(offered);
-        const NamedGroup group = NamedGroup.Secp256r1;
+        NamedGroup group = NamedGroup.Secp256r1;
 
         List<byte[]> secrets = new();
-        using EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
+        EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
         try
         {
             byte[] keyShare = ecdhe.ExportKeyShare();
@@ -200,22 +217,78 @@ internal static class Dtls13ClientHandshake
             RandomNumberGenerator.Fill(random);
 
             byte[] clientConnectionId = NewConnectionId(options);
-            byte[] clientHelloBody = BuildCertificateClientHelloBody(
+            byte[] clientHello1Body = BuildCertificateClientHelloBody(
                 random, group, keyShare, offeredIds, options.AllowRawPublicKeys,
-                clientConnectionId);
+                clientConnectionId, cookie: null);
 
             byte[] clientHelloMessage = HandshakeMessage.Serialize(
-                HandshakeType.ClientHello, 0, clientHelloBody);
+                HandshakeType.ClientHello, 0, clientHello1Body);
             byte[] clientHelloRecord = Dtls13PlaintextRecord.Encode(
                 Dtls13PlaintextRecord.HandshakeContentType, 0, 0, clientHelloMessage);
             await transport.SendAsync(clientHelloRecord, cancellationToken).ConfigureAwait(false);
 
             (ServerHello serverHello, byte[] serverHelloBody) =
                 await ReceiveServerHelloAsync(transport, cancellationToken).ConfigureAwait(false);
+
+            byte[]? transcriptPrefix = null;
+            byte[] clientHelloBody = clientHello1Body;
+            if (serverHello.IsHelloRetryRequest)
+            {
+                ParseHelloRetryRequest(
+                    serverHello, group, out NamedGroup retryGroup, out byte[] cookie);
+
+                // Regenerate the key_share for the (possibly new) selected group.
+                if (retryGroup != group)
+                {
+                    ecdhe.Dispose();
+                    ecdhe = EcdheKeyExchange.Create(retryGroup);
+                    group = retryGroup;
+                    keyShare = ecdhe.ExportKeyShare();
+                }
+
+                HashAlgorithmName retryHash =
+                    ResolveServerSuite(serverHello, offered).HashAlgorithm;
+                byte[] clientHello1Reconstructed = HandshakeMessage.ToTranscriptBytes(
+                    HandshakeType.ClientHello, clientHello1Body);
+                byte[] messageHash = TranscriptHash.SynthesizeMessageHash(
+                    retryHash, clientHello1Reconstructed);
+                byte[] helloRetryTranscript = HandshakeMessage.ToTranscriptBytes(
+                    HandshakeType.ServerHello, serverHelloBody);
+                transcriptPrefix = new byte[messageHash.Length + helloRetryTranscript.Length];
+                messageHash.CopyTo(transcriptPrefix, 0);
+                helloRetryTranscript.CopyTo(transcriptPrefix, messageHash.Length);
+
+                clientHelloBody = BuildCertificateClientHelloBody(
+                    random, group, keyShare, offeredIds, options.AllowRawPublicKeys,
+                    clientConnectionId, cookie);
+                byte[] clientHello2Message = HandshakeMessage.Serialize(
+                    HandshakeType.ClientHello, 1, clientHelloBody);
+                byte[] clientHello2Record = Dtls13PlaintextRecord.Encode(
+                    Dtls13PlaintextRecord.HandshakeContentType, 0, 1, clientHello2Message);
+                await transport.SendAsync(clientHello2Record, cancellationToken)
+                    .ConfigureAwait(false);
+
+                (serverHello, serverHelloBody) =
+                    await ReceiveServerHelloAsync(transport, cancellationToken)
+                        .ConfigureAwait(false);
+                if (serverHello.IsHelloRetryRequest)
+                {
+                    throw new DtlsAlertException(
+                        DtlsAlert.UnexpectedMessage,
+                        true,
+                        "The server sent a second HelloRetryRequest.");
+                }
+            }
+
             Dtls13CipherSuite suite = ResolveServerSuite(serverHello, offered);
             HashAlgorithmName hash = suite.HashAlgorithm;
 
             TranscriptHash transcript = new(hash);
+            if (transcriptPrefix is not null)
+            {
+                transcript.AppendRaw(transcriptPrefix);
+            }
+
             transcript.AppendMessage(HandshakeType.ClientHello, clientHelloBody);
             transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
@@ -380,10 +453,86 @@ internal static class Dtls13ClientHandshake
         }
         finally
         {
+            ecdhe.Dispose();
             foreach (byte[] secret in secrets)
             {
                 CryptographicOperations.ZeroMemory(secret);
             }
+        }
+    }
+
+    private static void ParseHelloRetryRequest(
+        ServerHello helloRetryRequest,
+        NamedGroup originalKeyShareGroup,
+        out NamedGroup selectedGroup,
+        out byte[] cookie)
+    {
+        selectedGroup = originalKeyShareGroup;
+        cookie = Array.Empty<byte>();
+        bool changesClientHello = false;
+
+        if (ExtensionList.TryFind(
+                helloRetryRequest.Extensions,
+                ExtensionType.KeyShare,
+                out HandshakeExtension keyShareExt))
+        {
+            if (!KeyShareExtension.TryParseHelloRetryRequest(
+                    keyShareExt.Data, out NamedGroup requested))
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.DecodeError,
+                    true,
+                    "The HelloRetryRequest key_share was malformed.");
+            }
+
+            bool wasOffered = false;
+            foreach (NamedGroup candidate in CertificateOfferedGroups)
+            {
+                if (candidate == requested)
+                {
+                    wasOffered = true;
+                    break;
+                }
+            }
+
+            // RFC 8446 section 4.1.4: the selected group must have been offered and must differ
+            // from a group already in the original key_share.
+            if (!wasOffered
+                || !EcdheKeyExchange.IsSupported(requested)
+                || requested == originalKeyShareGroup)
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.IllegalParameter,
+                    true,
+                    "The HelloRetryRequest selected an invalid group.");
+            }
+
+            selectedGroup = requested;
+            changesClientHello = true;
+        }
+
+        if (ExtensionList.TryFind(
+                helloRetryRequest.Extensions,
+                ExtensionType.Cookie,
+                out HandshakeExtension cookieExt))
+        {
+            if (!CookieExtension.TryParse(cookieExt.Data, out cookie))
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.DecodeError,
+                    true,
+                    "The HelloRetryRequest cookie was malformed.");
+            }
+
+            changesClientHello = true;
+        }
+
+        if (!changesClientHello)
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.IllegalParameter,
+                true,
+                "The HelloRetryRequest would not change the ClientHello.");
         }
     }
 
@@ -399,11 +548,6 @@ internal static class Dtls13ClientHandshake
             || !ServerHello.TryParse(shBody, out ServerHello serverHello))
         {
             throw new DtlsException("Expected a ServerHello but received a malformed record.");
-        }
-
-        if (serverHello.IsHelloRetryRequest)
-        {
-            throw new DtlsException("HelloRetryRequest is not supported.");
         }
 
         return (serverHello, shBody);
@@ -770,7 +914,8 @@ internal static class Dtls13ClientHandshake
         byte[] keyShare,
         ushort[] offeredIds,
         bool offerRawPublicKey,
-        byte[] connectionId)
+        byte[] connectionId,
+        byte[]? cookie)
     {
         List<HandshakeExtension> extensions = new()
         {
@@ -780,7 +925,7 @@ internal static class Dtls13ClientHandshake
                     new ushort[] { DtlsWireVersion.Dtls13 })),
             new HandshakeExtension(
                 ExtensionType.SupportedGroups,
-                SupportedGroupsExtension.Encode(new[] { group })),
+                SupportedGroupsExtension.Encode(CertificateOfferedGroups)),
             new HandshakeExtension(
                 ExtensionType.KeyShare,
                 KeyShareExtension.EncodeClientHello(
@@ -796,6 +941,12 @@ internal static class Dtls13ClientHandshake
                 ExtensionType.ServerCertificateType,
                 ServerCertificateTypeExtension.EncodeClientHello(
                     new[] { CertificateType.RawPublicKey, CertificateType.X509 })));
+        }
+
+        if (cookie is { Length: > 0 })
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.Cookie, CookieExtension.Encode(cookie)));
         }
 
         if (connectionId.Length > 0)

@@ -32,6 +32,16 @@ public sealed class DtlsServerOptions : DtlsOptions
     /// <summary>Whether to accept raw public keys (RFC 7250) from clients.</summary>
     public bool AllowRawPublicKeys { get; init; }
 
+    /// <summary>
+    /// Whether the server performs a stateless HelloRetryRequest cookie exchange
+    /// (RFC 9147 section 5.1 / RFC 8446 section 4.2.2) before continuing the handshake. This
+    /// forces the client to prove return-routability of its source address, mitigating
+    /// denial-of-service amplification before the server commits handshake state. Only applies
+    /// to the managed DTLS 1.3 certificate path; ignored by the native DTLS 1.0/1.2 backends
+    /// and by the external-PSK path.
+    /// </summary>
+    public bool EnableStatelessRetry { get; init; }
+
     /// <summary>An optional validator for a client raw public key (RFC 7250).</summary>
     public DtlsRawPublicKeyValidation? RawPublicKeyValidation { get; init; }
 

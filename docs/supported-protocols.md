@@ -79,6 +79,14 @@ For DTLS 1.0 and DTLS 1.2, named group availability is determined by the native 
 
 DTLS Connection ID (RFC 9146) is negotiated by the managed DTLS 1.3 engine so a connection can remain associated with its cryptographic state when the peer's address changes. It is opt-in: set `DtlsOptions.UseConnectionId` on both endpoints. When both peers enable it, each side generates a CID that the peer places on every protected record it sends (the CID is part of the AEAD additional data). If either side does not request a CID, the handshake proceeds without one. The native DTLS 1.0/1.2 backends do not use this setting.
 
+## Mutual (client-certificate) authentication
+
+The managed DTLS 1.3 certificate path supports mutual authentication (RFC 8446 section 4.3.2). Set `DtlsServerOptions.RequireClientCertificate` to make the server send a CertificateRequest; the client answers with its Certificate and CertificateVerify chosen from `DtlsClientOptions.ClientCertificates`. The server validates the presented certificate with `DtlsServerOptions.ClientCertificateValidation` and fails the handshake (alert `handshake_failure`) when a required certificate is absent. The client CertificateVerify signs the `"TLS 1.3, client CertificateVerify"` context string, distinct from the server's.
+
+## HelloRetryRequest (stateless anti-DoS cookie)
+
+Set `DtlsServerOptions.EnableStatelessRetry` to make the managed DTLS 1.3 certificate server answer the first ClientHello with a HelloRetryRequest carrying an authenticated cookie (RFC 9147 section 5.1 / RFC 8446 section 4.1.4). This forces the client to prove return-routability of its source address before the server commits handshake state, mitigating denial-of-service amplification. The cookie is an HMAC over the first ClientHello transcript hash and the selected group, so the server reconstructs the post-retry transcript from the returned cookie. When the client advertised an additional (EC)DHE group without a key_share, the HelloRetryRequest also corrects the group, and the client regenerates its key_share for it. The client resends a second ClientHello echoing the cookie, and both sides fold the synthetic `message_hash` of the first ClientHello into the transcript. The external-PSK path does not emit a HelloRetryRequest.
+
 ## Key update
 
 The managed DTLS 1.3 engine supports post-handshake key update (RFC 8446 section 4.6.3): call `DtlsConnection.UpdateKeyAsync(requestPeerUpdate)` to rotate the sending keys to the next application traffic generation (incrementing the epoch). With `requestPeerUpdate: true`, the peer also updates and returns a KeyUpdate. Inbound KeyUpdate messages are handled automatically. KeyUpdate is a DTLS 1.3 feature; the native 1.0/1.2 backends throw `NotSupportedException`.
