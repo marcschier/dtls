@@ -30,4 +30,9 @@
     <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- Reproducible, Git-based versioning for every project (assembly + package versions). -->
+  <ItemGroup>
+    <PackageReference Include="Nerdbank.GitVersioning" PrivateAssets="all" />
+  </ItemGroup>
+
 </Project>

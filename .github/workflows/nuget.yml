@@ -1,0 +1,59 @@
+name: nuget
+
+# Manually publishes the most recently published Dtls package from the repository's GitHub
+# Packages feed to nuget.org using NuGet trusted publishing (OIDC short-lived token — no stored
+# API key). Run from the Actions tab once a version has been published to GitHub Packages by the
+# tag-triggered CI job.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish latest to nuget.org
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write   # Required for OIDC (NuGet trusted publishing)
+      contents: read
+      packages: read     # Read the package from the GitHub Packages feed
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download latest Dtls package from GitHub Packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          id=dtls
+          index=https://nuget.pkg.github.com/marcschier/index.json
+          auth="Authorization: Bearer ${GH_TOKEN}"
+          base=$(curl -fsSL -H "$auth" "$index" \
+            | jq -r '.resources[] | select(."@type"=="PackageBaseAddress/3.0.0") | ."@id"' \
+            | head -n1)
+          base=${base%/}
+          latest=$(curl -fsSL -H "$auth" "$base/$id/index.json" | jq -r '.versions | last')
+          echo "Latest published $id version: $latest"
+          mkdir -p ./download
+          curl -fsSL -H "$auth" "$base/$id/$latest/$id.$latest.nupkg" \
+            -o "./download/$id.$latest.nupkg"
+          ls -l ./download
+
+      - name: NuGet login (OIDC trusted publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Push to nuget.org
+        run: >
+          dotnet nuget push "./download/*.nupkg"
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

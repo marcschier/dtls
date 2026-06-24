@@ -50,6 +50,17 @@ The native backends require their host OS: the Schannel DTLS 1.2 backend and its
 
 Tests that need a specific OS no-op elsewhere, so the suite is green on every platform.
 
+## Versioning & packages
+
+Versions come from [Nerdbank.GitVersioning](https://github.com/dotnet/Nerdbank.GitVersioning): `version.json` pins the `0.9` line and each commit gets a unique `0.9.{git-height}` version. Tag a release with `nbgv tag` (creating a `v0.9.x` tag) and push it.
+
+Pushing a `v*` tag runs CI and, once green, publishes `Dtls` to this repo's **GitHub Packages** NuGet feed. The manual **`nuget`** workflow (Actions tab) then takes the latest package from that feed and publishes it to **nuget.org** via [trusted publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing) (OIDC — no stored API key), using the `release` environment.
+
+First-time nuget.org setup (one-time, by a maintainer):
+
+- Create a trusted publishing policy at [nuget.org/account/trustedpublishing](https://www.nuget.org/account/trustedpublishing): Repository Owner `marcschier`, Repository `dtls`, Workflow File `nuget.yml`, Environment `release`.
+- Add a `NUGET_USER` secret (your nuget.org username, not email) to the `release` environment.
+
 ## Security
 
 This is a security-protocol implementation; see [`docs/security.md`](docs/security.md) for the threat model and hardening notes. DTLS 1.0 is deprecated (RFC 8996) and is **off by default**.

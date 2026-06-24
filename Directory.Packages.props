@@ -12,6 +12,11 @@
     <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="17.13.61" />
   </ItemGroup>
 
+  <!-- Build/versioning tooling. -->
+  <ItemGroup>
+    <PackageVersion Include="Nerdbank.GitVersioning" Version="3.10.85" />
+  </ItemGroup>
+
   <!-- Test dependencies. -->
   <ItemGroup>
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

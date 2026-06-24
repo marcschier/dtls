@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -21,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
@@ -44,6 +47,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
@@ -63,3 +68,30 @@ jobs:
         run: dotnet test tests/Dtls.IntegrationTests/Dtls.IntegrationTests.csproj -c Release --no-build
       - name: Interop tests (vs OpenSSL)
         run: dotnet test tests/Dtls.Interop.Tests/Dtls.Interop.Tests.csproj -c Release --no-build
+
+  publish-github:
+    name: Publish to GitHub Packages
+    runs-on: ubuntu-latest
+    needs: [lint, build-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - name: Pack
+        run: dotnet pack src/Dtls/Dtls.csproj -c Release -o ./artifacts
+      - name: Push to GitHub Packages
+        run: >
+          dotnet nuget push "./artifacts/*.nupkg"
+          --source https://nuget.pkg.github.com/marcschier/index.json
+          --api-key ${{ secrets.GITHUB_TOKEN }}
+          --skip-duplicate
