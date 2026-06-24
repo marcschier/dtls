@@ -36,8 +36,11 @@ public sealed class Dtls13CipherSuiteHandshakeTests
         // so the PSK matrix covers the SHA-256 suites.
         yield return new object[] { DtlsCipherSuite.Aes128GcmSha256 };
 #if NET8_0_OR_GREATER
-        yield return new object[] { DtlsCipherSuite.Aes128CcmSha256 };
-        yield return new object[] { DtlsCipherSuite.Aes128Ccm8Sha256 };
+        if (System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            yield return new object[] { DtlsCipherSuite.Aes128CcmSha256 };
+            yield return new object[] { DtlsCipherSuite.Aes128Ccm8Sha256 };
+        }
 #endif
     }
 
@@ -46,8 +49,11 @@ public sealed class Dtls13CipherSuiteHandshakeTests
         yield return new object[] { DtlsCipherSuite.Aes128GcmSha256 };
         yield return new object[] { DtlsCipherSuite.Aes256GcmSha384 };
 #if NET8_0_OR_GREATER
-        yield return new object[] { DtlsCipherSuite.Aes128CcmSha256 };
-        yield return new object[] { DtlsCipherSuite.Aes128Ccm8Sha256 };
+        if (System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            yield return new object[] { DtlsCipherSuite.Aes128CcmSha256 };
+            yield return new object[] { DtlsCipherSuite.Aes128Ccm8Sha256 };
+        }
 #endif
     }
 
@@ -151,6 +157,11 @@ public sealed class Dtls13CipherSuiteHandshakeTests
     [Fact]
     public async Task CertHandshake_NoOverlappingSuite_FailsHandshake()
     {
+        if (!System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            return;
+        }
+
         using X509Certificate2 certificate = CreateEcdsaSelfSigned();
 
         (InMemoryDatagramTransport clientTransport, InMemoryDatagramTransport serverTransport) =

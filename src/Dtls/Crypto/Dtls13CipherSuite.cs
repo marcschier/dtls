@@ -84,6 +84,9 @@ internal readonly struct Dtls13CipherSuite : IEquatable<Dtls13CipherSuite>
         16,
         8,
         Dtls13AeadKind.AesCcm);
+
+    /// <summary>Whether the BCL AES-CCM primitive is usable on this platform at runtime.</summary>
+    private static readonly bool CcmSupported = AesCcm.IsSupported;
 #endif
 
     /// <summary>
@@ -92,11 +95,24 @@ internal readonly struct Dtls13CipherSuite : IEquatable<Dtls13CipherSuite>
     /// the BCL <see cref="System.Security.Cryptography.AesCcm"/> primitive exists.
     /// </summary>
     public static IReadOnlyList<Dtls13CipherSuite> SupportedDefault { get; } =
+        BuildSupportedDefault();
+
+    private static Dtls13CipherSuite[] BuildSupportedDefault()
+    {
 #if NET8_0_OR_GREATER
-        new[] { Aes128GcmSha256, Aes256GcmSha384, Aes128CcmSha256, Aes128Ccm8Sha256 };
-#else
-        new[] { Aes128GcmSha256, Aes256GcmSha384 };
+        if (CcmSupported)
+        {
+            return new[]
+            {
+                Aes128GcmSha256,
+                Aes256GcmSha384,
+                Aes128CcmSha256,
+                Aes128Ccm8Sha256,
+            };
+        }
 #endif
+        return new[] { Aes128GcmSha256, Aes256GcmSha384 };
+    }
 
     /// <summary>The IANA-registered cipher suite identifier.</summary>
     public ushort Id { get; }
@@ -139,10 +155,10 @@ internal readonly struct Dtls13CipherSuite : IEquatable<Dtls13CipherSuite>
 #if NET8_0_OR_GREATER
             case 0x1304:
                 suite = Aes128CcmSha256;
-                return true;
+                return CcmSupported;
             case 0x1305:
                 suite = Aes128Ccm8Sha256;
-                return true;
+                return CcmSupported;
 #endif
             default:
                 suite = default;

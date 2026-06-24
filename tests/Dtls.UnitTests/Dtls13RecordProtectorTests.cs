@@ -175,6 +175,11 @@ public sealed class Dtls13RecordProtectorTests
     [InlineData(0x1305)]
     public void SealThenOpen_CcmSuites_RoundTrip(int suiteId)
     {
+        if (!System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            return;
+        }
+
         Dtls13CipherSuite.TryGet((ushort)suiteId, out Dtls13CipherSuite suite);
         using Dtls13RecordProtector protector = CreateProtector(suite);
 
@@ -201,6 +206,11 @@ public sealed class Dtls13RecordProtectorTests
     [InlineData(6)]
     public void SealThenOpen_Ccm8_TinyPayload_PadsToBlock(int payloadLength)
     {
+        if (!System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            return;
+        }
+
         // CCM-8 has an 8-byte tag, so tiny payloads need zero padding to reach the 16-byte
         // minimum sealed length required by sequence-number masking.
         Dtls13CipherSuite.TryGet(0x1305, out Dtls13CipherSuite suite);

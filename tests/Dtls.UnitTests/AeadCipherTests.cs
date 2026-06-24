@@ -47,12 +47,22 @@ public sealed class AeadCipherTests
     [Fact]
     public void AesCcm128_SealOpen_RoundTrips()
     {
+        if (!System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            return;
+        }
+
         AssertRoundTrip(new AesCcmCipher(HexOrRepeat.Range(2, 16), 16));
     }
 
     [Fact]
     public void AesCcm8_SealOpen_RoundTrips()
     {
+        if (!System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            return;
+        }
+
         AssertRoundTrip(new AesCcmCipher(HexOrRepeat.Range(4, 16), 8));
     }
 
@@ -61,6 +71,11 @@ public sealed class AeadCipherTests
     [InlineData(8)]
     public void AesCcm_TamperedTag_FailsToOpen(int tagLength)
     {
+        if (!System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            return;
+        }
+
         using AesCcmCipher cipher = new(HexOrRepeat.Range(6, 16), tagLength);
         byte[] nonce = HexOrRepeat.Range(0, 12);
         byte[] plaintext = HexOrRepeat.Range(10, 20);
