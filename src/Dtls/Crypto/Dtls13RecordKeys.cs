@@ -132,12 +132,19 @@ internal sealed class Dtls13RecordKeys : IDisposable
     /// <returns>An <see cref="IAeadCipher"/> bound to the write key.</returns>
     public IAeadCipher CreateAead()
     {
-        return CipherSuite.Aead switch
+        switch (CipherSuite.Aead)
         {
-            Dtls13AeadKind.AesGcm => new AesGcmCipher(_writeKey),
-            Dtls13AeadKind.ChaCha20Poly1305 => new ChaCha20Poly1305Cipher(_writeKey),
-            _ => throw new InvalidOperationException("Unknown AEAD kind."),
-        };
+            case Dtls13AeadKind.AesGcm:
+                return new AesGcmCipher(_writeKey);
+            case Dtls13AeadKind.ChaCha20Poly1305:
+                return new ChaCha20Poly1305Cipher(_writeKey);
+#if NET8_0_OR_GREATER
+            case Dtls13AeadKind.AesCcm:
+                return new AesCcmCipher(_writeKey, CipherSuite.TagLength);
+#endif
+            default:
+                throw new InvalidOperationException("Unknown AEAD kind.");
+        }
     }
 
     /// <inheritdoc />

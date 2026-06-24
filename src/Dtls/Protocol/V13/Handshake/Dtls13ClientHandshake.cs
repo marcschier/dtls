@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using Dtls.Crypto;
+using Dtls.Internal;
 using Dtls.Transport;
 
 namespace Dtls.Protocol.V13.Handshake;
@@ -55,6 +56,11 @@ internal static class Dtls13ClientHandshake
             throw new DtlsException("The PSK callback did not supply an identity and key.");
         }
 
+        // The external-PSK binder fixes the hash to SHA-256, so only SHA-256 suites are
+        // offered; the resolved AEAD may still differ (AES-128-GCM, AES-CCM, AES-CCM-8).
+        IReadOnlyList<Dtls13CipherSuite> offered = SelectPskCipherSuites(options);
+        ushort[] offeredIds = ToCipherSuiteIds(offered);
+
         Dtls13CipherSuite suite = Dtls13CipherSuite.Aes128GcmSha256;
         HashAlgorithmName hash = suite.HashAlgorithm;
         const NamedGroup group = NamedGroup.Secp256r1;
@@ -78,7 +84,7 @@ internal static class Dtls13ClientHandshake
             secrets.Add(binderKey);
 
             byte[] clientHelloBody = BuildClientHelloBody(
-                random, group, keyShare, identity, hash, binderKey, suite);
+                random, group, keyShare, identity, hash, binderKey, offeredIds);
 
             TranscriptHash transcript = new(hash);
             transcript.AppendMessage(HandshakeType.ClientHello, clientHelloBody);
@@ -89,9 +95,10 @@ internal static class Dtls13ClientHandshake
                 Dtls13PlaintextRecord.HandshakeContentType, 0, 0, clientHelloMessage);
             await transport.SendAsync(clientHelloRecord, cancellationToken).ConfigureAwait(false);
 
-            ServerHello serverHello = await ReceiveServerHelloAsync(
-                    transport, suite, transcript, cancellationToken)
-                .ConfigureAwait(false);
+            (ServerHello serverHello, byte[] serverHelloBody) =
+                await ReceiveServerHelloAsync(transport, cancellationToken).ConfigureAwait(false);
+            suite = ResolveServerSuite(serverHello, offered);
+            transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
             byte[] serverKeyShare = ExtractServerKeyShare(serverHello, group);
             VerifyServerSelectedIdentity(serverHello);
@@ -175,8 +182,10 @@ internal static class Dtls13ClientHandshake
         DtlsClientOptions options,
         CancellationToken cancellationToken)
     {
-        Dtls13CipherSuite suite = Dtls13CipherSuite.Aes128GcmSha256;
-        HashAlgorithmName hash = suite.HashAlgorithm;
+        // Certificate mode supports hash agility: the full configured suite list (mixed
+        // hashes allowed) is offered and the transcript hash is chosen after the ServerHello.
+        IReadOnlyList<Dtls13CipherSuite> offered = CipherSuitePolicy.Resolve(options.CipherSuites);
+        ushort[] offeredIds = ToCipherSuiteIds(offered);
         const NamedGroup group = NamedGroup.Secp256r1;
 
         List<byte[]> secrets = new();
@@ -188,10 +197,7 @@ internal static class Dtls13ClientHandshake
             RandomNumberGenerator.Fill(random);
 
             byte[] clientHelloBody = BuildCertificateClientHelloBody(
-                random, group, keyShare, suite, options.AllowRawPublicKeys);
-
-            TranscriptHash transcript = new(hash);
-            transcript.AppendMessage(HandshakeType.ClientHello, clientHelloBody);
+                random, group, keyShare, offeredIds, options.AllowRawPublicKeys);
 
             byte[] clientHelloMessage = HandshakeMessage.Serialize(
                 HandshakeType.ClientHello, 0, clientHelloBody);
@@ -199,9 +205,14 @@ internal static class Dtls13ClientHandshake
                 Dtls13PlaintextRecord.HandshakeContentType, 0, 0, clientHelloMessage);
             await transport.SendAsync(clientHelloRecord, cancellationToken).ConfigureAwait(false);
 
-            ServerHello serverHello = await ReceiveServerHelloAsync(
-                    transport, suite, transcript, cancellationToken)
-                .ConfigureAwait(false);
+            (ServerHello serverHello, byte[] serverHelloBody) =
+                await ReceiveServerHelloAsync(transport, cancellationToken).ConfigureAwait(false);
+            Dtls13CipherSuite suite = ResolveServerSuite(serverHello, offered);
+            HashAlgorithmName hash = suite.HashAlgorithm;
+
+            TranscriptHash transcript = new(hash);
+            transcript.AppendMessage(HandshakeType.ClientHello, clientHelloBody);
+            transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
             byte[] serverKeyShare = ExtractServerKeyShare(serverHello, group);
 
@@ -330,10 +341,8 @@ internal static class Dtls13ClientHandshake
         }
     }
 
-    private static async Task<ServerHello> ReceiveServerHelloAsync(
+    private static async Task<(ServerHello Hello, byte[] Body)> ReceiveServerHelloAsync(
         IDatagramTransport transport,
-        Dtls13CipherSuite suite,
-        TranscriptHash transcript,
         CancellationToken cancellationToken)
     {
         byte[] serverHelloDatagram = await ReceiveDatagramAsync(transport, cancellationToken)
@@ -351,13 +360,59 @@ internal static class Dtls13ClientHandshake
             throw new DtlsException("HelloRetryRequest is not supported.");
         }
 
-        if (serverHello.CipherSuite != suite.Id)
+        return (serverHello, shBody);
+    }
+
+    private static Dtls13CipherSuite ResolveServerSuite(
+        ServerHello serverHello,
+        IReadOnlyList<Dtls13CipherSuite> offered)
+    {
+        if (!Dtls13CipherSuite.TryGet(serverHello.CipherSuite, out Dtls13CipherSuite suite))
         {
             throw new DtlsException("The server selected an unsupported cipher suite.");
         }
 
-        transcript.AppendMessage(HandshakeType.ServerHello, shBody);
-        return serverHello;
+        foreach (Dtls13CipherSuite candidate in offered)
+        {
+            if (candidate.Id == suite.Id)
+            {
+                return suite;
+            }
+        }
+
+        throw new DtlsException("The server selected a cipher suite that was not offered.");
+    }
+
+    private static List<Dtls13CipherSuite> SelectPskCipherSuites(DtlsClientOptions options)
+    {
+        List<Dtls13CipherSuite> sha256 = new();
+        foreach (Dtls13CipherSuite suite in CipherSuitePolicy.Resolve(options.CipherSuites))
+        {
+            if (suite.HashAlgorithm == HashAlgorithmName.SHA256)
+            {
+                sha256.Add(suite);
+            }
+        }
+
+        if (sha256.Count == 0)
+        {
+            throw new DtlsException(
+                "External-PSK handshakes require a SHA-256 cipher suite, but none were "
+                + "configured (AES-256-GCM uses SHA-384).");
+        }
+
+        return sha256;
+    }
+
+    private static ushort[] ToCipherSuiteIds(IReadOnlyList<Dtls13CipherSuite> suites)
+    {
+        ushort[] ids = new ushort[suites.Count];
+        for (int i = 0; i < suites.Count; i++)
+        {
+            ids[i] = suites[i].Id;
+        }
+
+        return ids;
     }
 
     private static async Task SendClientFinishedAsync(
@@ -497,12 +552,12 @@ internal static class Dtls13ClientHandshake
         byte[] identity,
         HashAlgorithmName hash,
         byte[] binderKey,
-        Dtls13CipherSuite suite)
+        ushort[] offeredIds)
     {
         int hashLength = Hkdf.HashLength(hash);
         byte[] placeholder = new byte[hashLength];
         byte[] bodyWithPlaceholder = EncodeClientHelloBody(
-            random, group, keyShare, identity, placeholder, suite);
+            random, group, keyShare, identity, placeholder, offeredIds);
 
         byte[] transcriptBytes = HandshakeMessage.ToTranscriptBytes(
             HandshakeType.ClientHello, bodyWithPlaceholder);
@@ -518,7 +573,7 @@ internal static class Dtls13ClientHandshake
         }
 
         byte[] binder = Dtls13KeySchedule.ComputeBinder(hash, binderKey, truncatedHash);
-        return EncodeClientHelloBody(random, group, keyShare, identity, binder, suite);
+        return EncodeClientHelloBody(random, group, keyShare, identity, binder, offeredIds);
     }
 
     private static byte[] EncodeClientHelloBody(
@@ -527,7 +582,7 @@ internal static class Dtls13ClientHandshake
         byte[] keyShare,
         byte[] identity,
         byte[] binder,
-        Dtls13CipherSuite suite)
+        ushort[] offeredIds)
     {
         List<HandshakeExtension> extensions = new()
         {
@@ -556,7 +611,7 @@ internal static class Dtls13ClientHandshake
         ClientHello clientHello = new()
         {
             Random = random,
-            CipherSuites = new[] { suite.Id },
+            CipherSuites = offeredIds,
             Extensions = extensions,
         };
         return clientHello.Encode();
@@ -566,7 +621,7 @@ internal static class Dtls13ClientHandshake
         byte[] random,
         NamedGroup group,
         byte[] keyShare,
-        Dtls13CipherSuite suite,
+        ushort[] offeredIds,
         bool offerRawPublicKey)
     {
         List<HandshakeExtension> extensions = new()
@@ -598,7 +653,7 @@ internal static class Dtls13ClientHandshake
         ClientHello clientHello = new()
         {
             Random = random,
-            CipherSuites = new[] { suite.Id },
+            CipherSuites = offeredIds,
             Extensions = extensions,
         };
         return clientHello.Encode();

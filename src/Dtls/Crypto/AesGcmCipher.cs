@@ -19,14 +19,14 @@ internal sealed class AesGcmCipher : IAeadCipher
     public AesGcmCipher(ReadOnlySpan<byte> key)
     {
 #if NET8_0_OR_GREATER
-        _aesGcm = new AesGcm(key, Dtls13CipherSuite.TagLength);
+        _aesGcm = new AesGcm(key, TagLength);
 #else
         _aesGcm = new AesGcm(key);
 #endif
     }
 
     /// <inheritdoc />
-    public int TagLength => Dtls13CipherSuite.TagLength;
+    public int TagLength => 16;
 
     /// <inheritdoc />
     public void Seal(

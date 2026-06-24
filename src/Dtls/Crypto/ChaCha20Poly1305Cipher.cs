@@ -38,7 +38,7 @@ internal sealed class ChaCha20Poly1305Cipher : IAeadCipher
     }
 
     /// <inheritdoc />
-    public int TagLength => Dtls13CipherSuite.TagLength;
+    public int TagLength => 16;
 
     /// <inheritdoc />
     public void Seal(

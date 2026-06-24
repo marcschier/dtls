@@ -168,4 +168,64 @@ public sealed class Dtls13RecordProtectorTests
         Assert.Throws<NotSupportedException>(() =>
             protector.Seal(0, 1, ApplicationData, payload, default, record));
     }
+
+#if NET8_0_OR_GREATER
+    [Theory]
+    [InlineData(0x1304)]
+    [InlineData(0x1305)]
+    public void SealThenOpen_CcmSuites_RoundTrip(int suiteId)
+    {
+        Dtls13CipherSuite.TryGet((ushort)suiteId, out Dtls13CipherSuite suite);
+        using Dtls13RecordProtector protector = CreateProtector(suite);
+
+        byte[] payload = HexOrRepeat.Range(0x40, 48);
+        const ulong seq = 6;
+        byte[] record = new byte[protector.GetSealedLength(0, seq, payload.Length)];
+
+        int written = protector.Seal(0, seq, ApplicationData, payload, default, record);
+
+        Assert.True(protector.TryOpen(
+            record.AsSpan(0, written),
+            out byte contentType,
+            out byte[] recovered,
+            out ulong recoveredSeq));
+
+        Assert.Equal(ApplicationData, contentType);
+        Assert.Equal(payload, recovered);
+        Assert.Equal(seq, recoveredSeq);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(6)]
+    public void SealThenOpen_Ccm8_TinyPayload_PadsToBlock(int payloadLength)
+    {
+        // CCM-8 has an 8-byte tag, so tiny payloads need zero padding to reach the 16-byte
+        // minimum sealed length required by sequence-number masking.
+        Dtls13CipherSuite.TryGet(0x1305, out Dtls13CipherSuite suite);
+        using Dtls13RecordProtector protector = CreateProtector(suite);
+
+        byte[] payload = HexOrRepeat.Range(0x70, payloadLength);
+        const ulong seq = 4;
+        int sealedLength = protector.GetSealedLength(0, seq, payload.Length);
+        byte[] record = new byte[sealedLength];
+
+        int written = protector.Seal(0, seq, ApplicationData, payload, default, record);
+
+        // The encrypted portion (sealed length minus the 1-byte unified header prefix and
+        // the short sequence number) must be at least one AES block.
+        Assert.True(written >= SequenceNumberEncryptor.BlockLength);
+
+        Assert.True(protector.TryOpen(
+            record.AsSpan(0, written),
+            out byte contentType,
+            out byte[] recovered,
+            out ulong recoveredSeq));
+
+        Assert.Equal(ApplicationData, contentType);
+        Assert.Equal(payload, recovered);
+        Assert.Equal(seq, recoveredSeq);
+    }
+#endif
 }

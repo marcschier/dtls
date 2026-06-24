@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using Dtls.Crypto;
+using Dtls.Internal;
 using Dtls.Transport;
 
 namespace Dtls.Protocol.V13.Handshake;
@@ -44,7 +45,8 @@ internal static class Dtls13ServerHandshake
             throw new DtlsException("The initial datagram was not a valid ClientHello.");
         }
 
-        Dtls13CipherSuite suite = SelectCipherSuite(clientHello);
+        Dtls13CipherSuite suite = SelectCipherSuite(
+            clientHello, CipherSuitePolicy.Resolve(options.CipherSuites));
         HashAlgorithmName hash = suite.HashAlgorithm;
         NamedGroup group = SelectGroup(clientHello, out byte[] clientKeyShare);
 
@@ -470,14 +472,19 @@ internal static class Dtls13ServerHandshake
         return scheme;
     }
 
-    private static Dtls13CipherSuite SelectCipherSuite(ClientHello clientHello)
+    private static Dtls13CipherSuite SelectCipherSuite(
+        ClientHello clientHello,
+        IReadOnlyList<Dtls13CipherSuite> allowed)
     {
-        foreach (ushort offered in clientHello.CipherSuites)
+        // Server preference: pick the first allowed suite the client also offered.
+        foreach (Dtls13CipherSuite suite in allowed)
         {
-            if (Dtls13CipherSuite.TryGet(offered, out Dtls13CipherSuite suite)
-                && suite.Aead == Dtls13AeadKind.AesGcm)
+            foreach (ushort offered in clientHello.CipherSuites)
             {
-                return suite;
+                if (offered == suite.Id)
+                {
+                    return suite;
+                }
             }
         }
 

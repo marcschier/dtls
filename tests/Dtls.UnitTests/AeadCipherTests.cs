@@ -43,6 +43,39 @@ public sealed class AeadCipherTests
         Assert.False(cipher.Open(nonce, sealed1, aad, recovered));
     }
 
+#if NET8_0_OR_GREATER
+    [Fact]
+    public void AesCcm128_SealOpen_RoundTrips()
+    {
+        AssertRoundTrip(new AesCcmCipher(HexOrRepeat.Range(2, 16), 16));
+    }
+
+    [Fact]
+    public void AesCcm8_SealOpen_RoundTrips()
+    {
+        AssertRoundTrip(new AesCcmCipher(HexOrRepeat.Range(4, 16), 8));
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(8)]
+    public void AesCcm_TamperedTag_FailsToOpen(int tagLength)
+    {
+        using AesCcmCipher cipher = new(HexOrRepeat.Range(6, 16), tagLength);
+        byte[] nonce = HexOrRepeat.Range(0, 12);
+        byte[] plaintext = HexOrRepeat.Range(10, 20);
+        byte[] aad = HexOrRepeat.Range(50, 5);
+
+        byte[] sealed1 = new byte[plaintext.Length + cipher.TagLength];
+        cipher.Seal(nonce, plaintext, aad, sealed1);
+        sealed1[^1] ^= 0xFF;
+
+        Assert.Equal(tagLength, cipher.TagLength);
+        byte[] recovered = new byte[plaintext.Length];
+        Assert.False(cipher.Open(nonce, sealed1, aad, recovered));
+    }
+#endif
+
     private static void AssertRoundTrip(IAeadCipher cipher)
     {
         using (cipher)

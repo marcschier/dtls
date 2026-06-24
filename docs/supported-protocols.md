@@ -14,13 +14,31 @@ OpenSSL, Schannel, and Apple Secure Transport / Network.framework do not current
 
 ## DTLS 1.3 cipher suites
 
-The intended DTLS 1.3 AEAD cipher suites are:
+The managed DTLS 1.3 engine negotiates the following AEAD cipher suites (RFC 9147 /
+RFC 8446 appendix B.4), in this default preference order:
 
-| Cipher suite | Notes |
-| --- | --- |
-| `TLS_AES_128_GCM_SHA256` | Required modern AEAD suite |
-| `TLS_AES_256_GCM_SHA384` | Higher-strength AES-GCM suite |
-| `TLS_CHACHA20_POLY1305_SHA256` | AEAD suite for platforms and CPUs where ChaCha20-Poly1305 is preferred or available |
+| Cipher suite | ID | Hash | Tag | Frameworks | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `TLS_AES_128_GCM_SHA256` | 0x1301 | SHA-256 | 16 | all | Mandatory modern AEAD suite |
+| `TLS_AES_256_GCM_SHA384` | 0x1302 | SHA-384 | 16 | all | Higher-strength AES-GCM suite |
+| `TLS_AES_128_CCM_SHA256` | 0x1304 | SHA-256 | 16 | net8.0+ | AES-CCM; uses BCL `AesCcm` |
+| `TLS_AES_128_CCM_8_SHA256` | 0x1305 | SHA-256 | 8 | net8.0+ | AES-CCM with a short (8-byte) tag |
+
+The AES-CCM suites require the BCL `System.Security.Cryptography.AesCcm` primitive, which is
+unavailable on `netstandard2.1`; they are only negotiable on .NET 8 or later. On
+`netstandard2.1` only the two AES-GCM suites are supported.
+
+`TLS_CHACHA20_POLY1305_SHA256` (0x1303) is intentionally **not** negotiated for DTLS 1.3.
+DTLS 1.3 mandates record sequence-number encryption (RFC 9147 section 4.2.3), which for the
+ChaCha20-Poly1305 suite requires a raw ChaCha20 keystream block that the BCL does not expose.
+The suite remains defined internally but is excluded from negotiation.
+
+Applications select or restrict suites with `DtlsOptions.CipherSuites`
+(a `DtlsCipherSuite` preference/allow-list). An empty list (the default) negotiates all
+suites supported on the current target framework in the order above. The client offers the
+configured list (for external-PSK handshakes, only the SHA-256 suites, since the PSK binder
+fixes the hash to SHA-256); the server picks by its own preference order intersected with the
+client's offer and fails the handshake when there is no overlap.
 
 DTLS 1.3 support is AEAD-only and does not include legacy CBC or MAC-then-encrypt cipher suites.
 

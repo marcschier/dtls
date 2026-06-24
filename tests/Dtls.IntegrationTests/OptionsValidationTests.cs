@@ -53,4 +53,18 @@ public sealed class OptionsValidationTests
         };
         Assert.Throws<DtlsException>(options.Validate);
     }
+
+    [Fact]
+    public void CipherSuites_SupportedEntries_Valid()
+    {
+        DtlsClientOptions options = new()
+        {
+            CipherSuites = new[]
+            {
+                DtlsCipherSuite.Aes256GcmSha384,
+                DtlsCipherSuite.Aes128GcmSha256,
+            },
+        };
+        options.Validate();
+    }
 }

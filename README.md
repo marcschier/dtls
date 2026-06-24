@@ -18,6 +18,7 @@ Delegating the legacy CBC-era 1.0/1.2 handshakes to hardened native stacks avoid
 ## Features
 
 - DTLS **1.3** (managed; client and server) — working on Windows and Linux, with **PSK**, **X.509 certificate** (ECDSA/RSA-PSS), and **Raw Public Key** (RFC 7250) authentication.
+- DTLS 1.3 cipher suites: **AES-128-GCM** and **AES-256-GCM** (all TFMs), plus **AES-128-CCM** and **AES-128-CCM-8** (net8+); selectable via `DtlsOptions.CipherSuites`. (ChaCha20-Poly1305 is not offered: the BCL has no raw ChaCha20 for DTLS 1.3 sequence-number encryption.)
 - DTLS **1.2** on **Windows** via the native Schannel backend — working (client and server, certificate auth).
 - DTLS **1.2** on **Linux** via the native OpenSSL backend — working (client and server, certificate + PSK), with verified interop against the `openssl` CLI (`s_server`/`s_client`).
 - DTLS **1.0/1.2** on macOS (Secure Transport) — planned (honest stub today).

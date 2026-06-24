@@ -17,10 +17,10 @@ namespace Dtls.Protocol.V13;
 /// sequence number in its pre-encryption (plaintext) form, per RFC 9147 section 5.2.
 /// </para>
 /// <para>
-/// Sequence-number encryption is implemented for the AES-GCM suites only. The
-/// ChaCha20-Poly1305 suite requires a raw ChaCha20 keystream block that the BCL does not
-/// expose, so this protector throws <see cref="NotSupportedException"/> for that suite;
-/// support is deferred.
+/// Sequence-number encryption is implemented for the AES-based suites (AES-GCM and
+/// AES-CCM). The ChaCha20-Poly1305 suite requires a raw ChaCha20 keystream block that the
+/// BCL does not expose, so this protector throws <see cref="NotSupportedException"/> for
+/// that suite; support is deferred.
 /// </para>
 /// <para>This type takes ownership of the supplied <see cref="Dtls13RecordKeys"/>.</para>
 /// </remarks>
@@ -95,7 +95,18 @@ internal sealed class Dtls13RecordProtector : IDisposable
             connectionIdLength,
             sixteenBit,
             lengthPresent: true);
-        return headerLength + plaintextLength + 1 + _tagLength;
+        int innerLength = ComputePaddedInnerLength(plaintextLength);
+        return headerLength + innerLength + _tagLength;
+    }
+
+    private int ComputePaddedInnerLength(int plaintextLength)
+    {
+        // The inner plaintext is the payload, a content-type byte, then zero padding. The
+        // sealed ciphertext must be at least one AES block (16 bytes) so RFC 9147 4.2.3
+        // sequence-number masking can sample it; pad when the tag is short (CCM-8).
+        int innerLength = plaintextLength + 1;
+        int minimumInner = SequenceNumberEncryptor.BlockLength - _tagLength;
+        return innerLength < minimumInner ? minimumInner : innerLength;
     }
 
     /// <summary>
@@ -125,7 +136,8 @@ internal sealed class Dtls13RecordProtector : IDisposable
             ? (sequenceNumber & 0xFFFF)
             : (sequenceNumber & 0xFF));
 
-        int innerLength = plaintext.Length + 1;
+        int innerLength = ComputePaddedInnerLength(plaintext.Length);
+        int paddingLength = innerLength - (plaintext.Length + 1);
         int encryptedLength = innerLength + _tagLength;
         int headerLength = Dtls13RecordHeader.ComputeLength(
             connectionId.Length,
@@ -165,6 +177,10 @@ internal sealed class Dtls13RecordProtector : IDisposable
         {
             plaintext.CopyTo(inner);
             inner[plaintext.Length] = contentType;
+            if (paddingLength > 0)
+            {
+                Array.Clear(inner, plaintext.Length + 1, paddingLength);
+            }
 
             Span<byte> nonce = stackalloc byte[NonceLength];
             _keys.ComputeNonce(sequenceNumber, nonce);

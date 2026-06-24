@@ -5,8 +5,8 @@ namespace Dtls.Crypto;
 
 /// <summary>
 /// Derives the record-sequence-number encryption mask defined by RFC 9147 section 4.2.3.
-/// For the AES-GCM suites the mask is a single-block AES-ECB encryption of the first 16
-/// bytes of the AEAD ciphertext under the <c>sn_key</c>.
+/// For the AES-based suites (AES-GCM and AES-CCM) the mask is a single-block AES-ECB
+/// encryption of the first 16 bytes of the AEAD ciphertext under the <c>sn_key</c>.
 /// </summary>
 /// <remarks>
 /// ChaCha20-Poly1305 sequence-number masking requires a raw ChaCha20 keystream block,
@@ -32,7 +32,7 @@ internal sealed class SequenceNumberEncryptor : IDisposable
         ReadOnlySpan<byte> sequenceNumberKey)
     {
         _aead = cipherSuite.Aead;
-        if (_aead != Dtls13AeadKind.AesGcm)
+        if (!IsAesBased(_aead))
         {
             return;
         }
@@ -67,7 +67,7 @@ internal sealed class SequenceNumberEncryptor : IDisposable
     /// </exception>
     public void Mask(ReadOnlySpan<byte> ciphertextSample, Span<byte> mask)
     {
-        if (_aead != Dtls13AeadKind.AesGcm || _aes is null)
+        if (!IsAesBased(_aead) || _aes is null)
         {
             throw new NotSupportedException(
                 "ChaCha20-Poly1305 sequence-number encryption is not yet supported.");
@@ -108,4 +108,7 @@ internal sealed class SequenceNumberEncryptor : IDisposable
 
     /// <inheritdoc />
     public void Dispose() => _aes?.Dispose();
+
+    private static bool IsAesBased(Dtls13AeadKind aead) =>
+        aead is Dtls13AeadKind.AesGcm or Dtls13AeadKind.AesCcm;
 }

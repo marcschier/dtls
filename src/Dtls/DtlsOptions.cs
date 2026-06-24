@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using Dtls.Internal;
 
 namespace Dtls;
 
@@ -35,6 +37,16 @@ public abstract class DtlsOptions
     /// <summary>The overall handshake timeout. Defaults to 30 seconds.</summary>
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// The DTLS 1.3 AEAD cipher suites to negotiate, in preference order. An empty list
+    /// (the default) negotiates all suites supported on the current target framework, in a
+    /// secure default order. The AES-CCM suites
+    /// (<see cref="DtlsCipherSuite.Aes128CcmSha256"/>,
+    /// <see cref="DtlsCipherSuite.Aes128Ccm8Sha256"/>) are only negotiable on .NET 8 or
+    /// later; entries unsupported on the current framework are ignored.
+    /// </summary>
+    public IReadOnlyList<DtlsCipherSuite> CipherSuites { get; init; } = new List<DtlsCipherSuite>();
+
     /// <summary>Validates the option values and throws on inconsistencies.</summary>
     /// <exception cref="DtlsException">The options are inconsistent or unsafe.</exception>
     public virtual void Validate()
@@ -64,6 +76,13 @@ public abstract class DtlsOptions
         if (HandshakeTimeout <= TimeSpan.Zero)
         {
             throw new DtlsException("HandshakeTimeout must be positive.");
+        }
+
+        if (CipherSuites.Count > 0 && !CipherSuitePolicy.HasSupportedEntry(CipherSuites))
+        {
+            throw new DtlsException(
+                "None of the configured CipherSuites are supported on this target framework "
+                + "(the AES-CCM suites require .NET 8 or later).");
         }
     }
 }
