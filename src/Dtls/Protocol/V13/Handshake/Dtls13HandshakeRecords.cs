@@ -60,6 +60,67 @@ internal static class Dtls13HandshakeRecords
     }
 
     /// <summary>
+    /// Seals an ACK message (RFC 9147 section 7) listing <paramref name="recordNumbers"/> into a
+    /// protected epoch-2 record with the ack content type.
+    /// </summary>
+    public static byte[] SealAckRecord(
+        Dtls13RecordProtector protector,
+        ulong sequenceNumber,
+        IReadOnlyList<RecordNumber> recordNumbers)
+    {
+        const ushort handshakeEpoch = 2;
+        byte[] ackBody = Dtls13Ack.Encode(recordNumbers);
+        int sealedLength = protector.GetSealedLength(0, sequenceNumber, ackBody.Length);
+        byte[] record = new byte[sealedLength];
+        protector.Seal(
+            handshakeEpoch,
+            sequenceNumber,
+            Dtls13PlaintextRecord.AckContentType,
+            ackBody,
+            ReadOnlySpan<byte>.Empty,
+            record);
+        return record;
+    }
+
+    /// <summary>
+    /// Returns whether <paramref name="datagram"/> contains a record that opens under
+    /// <paramref name="protector"/> as an ACK (RFC 9147 section 7).
+    /// </summary>
+    public static bool ContainsAck(
+        ReadOnlySpan<byte> datagram,
+        Dtls13RecordProtector protector)
+    {
+        ReadOnlySpan<byte> remaining = datagram;
+        while (!remaining.IsEmpty)
+        {
+            if (!Dtls13RecordHeader.TryParse(remaining, 0, out var header))
+            {
+                break;
+            }
+
+            int recordLength = header.HeaderLength + header.EncryptedRecordLength;
+            if (recordLength <= 0 || recordLength > remaining.Length)
+            {
+                break;
+            }
+
+            ReadOnlySpan<byte> record = remaining.Slice(0, recordLength);
+            remaining = remaining.Slice(recordLength);
+
+            if (protector.TryOpen(record, out byte contentType, out byte[] plaintext, out _))
+            {
+                Array.Clear(plaintext, 0, plaintext.Length);
+                if (contentType == Dtls13PlaintextRecord.AckContentType)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Reads the first epoch-0 plaintext handshake message from <paramref name="datagram"/>
     /// and returns its type and body.
     /// </summary>

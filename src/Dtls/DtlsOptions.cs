@@ -45,6 +45,21 @@ public abstract class DtlsOptions
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// The initial DTLS handshake retransmission timeout (RFC 9147 section 5.8). When an
+    /// expected handshake flight is not received within this interval the previous flight is
+    /// retransmitted, with the timeout doubling on each retry (capped) up to
+    /// <see cref="MaxHandshakeRetransmissions"/> attempts. Only applies to the managed DTLS 1.3
+    /// path. Defaults to 1 second.
+    /// </summary>
+    public TimeSpan HandshakeRetransmissionTimeout { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The maximum number of handshake flight retransmissions before the handshake is abandoned
+    /// (RFC 9147 section 5.8). Only applies to the managed DTLS 1.3 path. Defaults to 8.
+    /// </summary>
+    public int MaxHandshakeRetransmissions { get; init; } = 8;
+
+    /// <summary>
     /// The DTLS 1.3 AEAD cipher suites to negotiate, in preference order. An empty list
     /// (the default) negotiates all suites supported on the current target framework, in a
     /// secure default order. The AES-CCM suites
@@ -83,6 +98,16 @@ public abstract class DtlsOptions
         if (HandshakeTimeout <= TimeSpan.Zero)
         {
             throw new DtlsException("HandshakeTimeout must be positive.");
+        }
+
+        if (HandshakeRetransmissionTimeout <= TimeSpan.Zero)
+        {
+            throw new DtlsException("HandshakeRetransmissionTimeout must be positive.");
+        }
+
+        if (MaxHandshakeRetransmissions < 0)
+        {
+            throw new DtlsException("MaxHandshakeRetransmissions must not be negative.");
         }
 
         if (CipherSuites.Count > 0 && !CipherSuitePolicy.HasSupportedEntry(CipherSuites))
