@@ -2,7 +2,7 @@
 
 A cross-platform [DTLS](https://datatracker.ietf.org/doc/html/rfc9147) library for .NET that, like the BCL, uses the host operating system's cryptography. It supports **DTLS 1.0, 1.2, and 1.3** with a modern, allocation-conscious (`Span<T>`) datagram API.
 
-> Status: under active development. Working and verified end to end today: the managed **DTLS 1.3** path (PSK, certificate, and raw-public-key auth) on Windows and Linux, the native **Windows Schannel DTLS 1.2** backend, the native **Linux OpenSSL DTLS 1.2** backend (certificate + PSK, including interop against the `openssl` CLI), and the native **macOS Secure Transport DTLS 1.0** backend (certificate; verified on the macOS CI runner). On current macOS, Secure Transport's deprecated API negotiates only DTLS 1.0 — DTLS 1.2 is not attainable through it. See [`docs/`](docs/) for details.
+> Status: under active development. Working and verified end to end today: the managed **DTLS 1.3** path (PSK, certificate, and raw-public-key auth) on Windows and Linux, the native **Windows Schannel DTLS 1.2** backend, the native **Linux OpenSSL DTLS 1.2** backend (certificate + PSK, including interop against the `openssl` CLI), and the native **macOS Network.framework DTLS 1.2** backend (certificate; verified on the macOS CI runner), with the deprecated **Secure Transport DTLS 1.0** stack as a fallback. See [`docs/`](docs/) for details.
 
 ## Why hybrid
 
@@ -10,7 +10,7 @@ No native OS DTLS stack supports DTLS 1.3 yet (OpenSSL, Schannel, and Apple all 
 
 | DTLS version | Engine | Crypto provider |
 | ------------ | ------ | --------------- |
-| 1.0, 1.2 | **Native OS stack** (P/Invoke) | OpenSSL (Linux) · Schannel (Windows) · Secure Transport (macOS, DTLS 1.0 only) |
+| 1.0, 1.2 | **Native OS stack** (P/Invoke) | OpenSSL (Linux) · Schannel (Windows) · Network.framework / Secure Transport (macOS) |
 | 1.3 | **Managed C#** | BCL `System.Security.Cryptography` (delegates to OpenSSL / CNG / Apple) |
 
 Delegating the legacy CBC-era 1.0/1.2 handshakes to hardened native stacks avoids hand-rolling the most dangerous (timing/padding-oracle prone) crypto, while the clean AEAD-only 1.3 path is implemented in managed, AOT-friendly code.
@@ -21,7 +21,7 @@ Delegating the legacy CBC-era 1.0/1.2 handshakes to hardened native stacks avoid
 - DTLS 1.3 cipher suites: **AES-128-GCM** and **AES-256-GCM** (all TFMs), plus **AES-128-CCM** and **AES-128-CCM-8** (net8+); selectable via `DtlsOptions.CipherSuites`. (ChaCha20-Poly1305 is not offered: the BCL has no raw ChaCha20 for DTLS 1.3 sequence-number encryption.)
 - DTLS **1.2** on **Windows** via the native Schannel backend — working (client and server, certificate auth).
 - DTLS **1.2** on **Linux** via the native OpenSSL backend — working (client and server, certificate + PSK), with verified interop against the `openssl` CLI (`s_server`/`s_client`).
-- DTLS **1.0** on **macOS** via the native Secure Transport backend — working (client and server, certificate auth), verified on the macOS CI runner. DTLS **1.2** is **not** available on macOS: Secure Transport's deprecated API rejects 1.2 on current macOS (`errSSLBadConfiguration`), and a Network.framework backend is future work.
+- DTLS **1.2** on **macOS** via the native Network.framework backend — working (client and server, certificate auth), verified on the macOS CI runner. Network.framework owns its own UDP socket, so the backend bridges it to the library's `IDatagramTransport` through an internal loopback relay. The deprecated **Secure Transport** stack provides a **DTLS 1.0** fallback (Secure Transport cannot select DTLS 1.2 on current macOS).
 - Transport-agnostic datagram API with a built-in UDP `Socket` adapter and an in-memory loopback transport.
 - Targets **netstandard2.1, net8.0, net9.0, net10.0**; **NativeAOT-compatible** on net10, verified on Windows and Linux.
 

@@ -7,14 +7,16 @@ Dtls supports DTLS 1.0, DTLS 1.2, and DTLS 1.3 across Linux, Windows, and macOS 
 | DTLS version | Linux | Windows | macOS | Engine | Default |
 | --- | --- | --- | --- | --- | --- |
 | DTLS 1.0 | OpenSSL | Schannel/SSPI | Secure Transport | Native | Off by default; explicit opt-in required |
-| DTLS 1.2 | OpenSSL | Schannel/SSPI | Not available (see note) | Native | Enabled |
+| DTLS 1.2 | OpenSSL | Schannel/SSPI | Network.framework | Native | Enabled |
 | DTLS 1.3 | Managed C# with BCL crypto | Managed C# with BCL crypto | Managed C# with BCL crypto | Managed | Enabled where policy allows |
 
 OpenSSL, Schannel, and Apple Secure Transport / Network.framework do not currently provide a mainstream native DTLS 1.3 stack, so DTLS 1.3 is implemented in managed code and uses BCL cryptographic primitives backed by the operating system crypto provider.
 
-### macOS Secure Transport limitation
+### macOS native backend (Network.framework, Secure Transport fallback)
 
-On current macOS, the deprecated Secure Transport API negotiates **only DTLS 1.0**. Requesting DTLS 1.2 through `SSLSetProtocolVersionMin`/`SSLSetProtocolVersionMax`/`SSLSetProtocolVersionEnabled` returns `errSSLBadConfiguration` (-9830), verified on the macOS CI runner. The macOS native backend therefore provides DTLS 1.0 only (certificate auth), and the macOS DTLS 1.0 handshake is exercised by a macOS-guarded self-interop integration test. There is no native DTLS 1.2 path on macOS today; a future Network.framework backend may restore it.
+On macOS the native DTLS path prefers Apple's modern **Network.framework**, whose secure-UDP transport negotiates **DTLS 1.2** (verified on the macOS CI runner, certificate auth). Because Network.framework owns its own UDP socket and exposes an asynchronous, Objective-C block-based API, the backend runs the DTLS endpoint over a private loopback socket and bridges the encrypted datagrams to and from the application's transport with an internal relay; the block callbacks are driven through a small Objective-C block ABI shim.
+
+The deprecated **Secure Transport** stack remains as a **DTLS 1.0** fallback (certificate auth), used when Network.framework is unavailable or when only DTLS 1.0 is requested. Secure Transport cannot select DTLS 1.2 on current macOS: requesting it through `SSLSetProtocolVersionMin`/`SSLSetProtocolVersionMax`/`SSLSetProtocolVersionEnabled` returns `errSSLBadConfiguration` (-9830). Both paths are exercised by macOS-guarded self-interop integration tests (DTLS 1.2 over Network.framework and DTLS 1.0 over Secure Transport).
 
 ## DTLS 1.3 cipher suites
 

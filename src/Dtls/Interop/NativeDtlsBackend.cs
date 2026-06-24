@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
+using Dtls.Interop.Network;
 using Dtls.Interop.OpenSsl;
 using Dtls.Interop.Schannel;
-using Dtls.Interop.SecureTransport;
 
 namespace Dtls.Interop;
 
@@ -28,7 +28,7 @@ internal static class NativeDtlsBackend
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
-            return new SecureTransportDtlsBackend();
+            return new NetworkDtlsBackend();
         }
 
         return null;
