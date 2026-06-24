@@ -28,6 +28,11 @@ public sealed class Dtls13CipherSuiteTests
     [InlineData(0x1305, 16, 8)]
     public void TryGet_Ccm_ReturnsExpectedGeometry(int id, int keyLength, int tagLength)
     {
+        if (!System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            return;
+        }
+
         bool found = Dtls13CipherSuite.TryGet((ushort)id, out Dtls13CipherSuite suite);
 
         Assert.True(found);
@@ -40,12 +45,21 @@ public sealed class Dtls13CipherSuiteTests
     }
 
     [Fact]
-    public void SupportedDefault_IncludesCcm_OnNet8Plus()
+    public void SupportedDefault_IncludesCcm_WhenAesCcmSupported()
     {
         ushort[] ids = ToIds(Dtls13CipherSuite.SupportedDefault);
-        Assert.Equal(new ushort[] { 0x1301, 0x1302, 0x1304, 0x1305 }, ids);
-        Assert.True(Dtls13CipherSuite.IsSupported(0x1304));
-        Assert.True(Dtls13CipherSuite.IsSupported(0x1305));
+        if (System.Security.Cryptography.AesCcm.IsSupported)
+        {
+            Assert.Equal(new ushort[] { 0x1301, 0x1302, 0x1304, 0x1305 }, ids);
+            Assert.True(Dtls13CipherSuite.IsSupported(0x1304));
+            Assert.True(Dtls13CipherSuite.IsSupported(0x1305));
+        }
+        else
+        {
+            Assert.Equal(new ushort[] { 0x1301, 0x1302 }, ids);
+            Assert.False(Dtls13CipherSuite.IsSupported(0x1304));
+            Assert.False(Dtls13CipherSuite.IsSupported(0x1305));
+        }
     }
 #else
     [Fact]
