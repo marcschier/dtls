@@ -77,7 +77,11 @@ For DTLS 1.0 and DTLS 1.2, named group availability is determined by the native 
 
 ## Connection ID
 
-DTLS Connection ID from RFC 9146 is supported so a connection can remain associated with its cryptographic state when peer addressing changes and policy permits that behavior.
+DTLS Connection ID (RFC 9146) is negotiated by the managed DTLS 1.3 engine so a connection can remain associated with its cryptographic state when the peer's address changes. It is opt-in: set `DtlsOptions.UseConnectionId` on both endpoints. When both peers enable it, each side generates a CID that the peer places on every protected record it sends (the CID is part of the AEAD additional data). If either side does not request a CID, the handshake proceeds without one. The native DTLS 1.0/1.2 backends do not use this setting.
+
+## Key update
+
+The managed DTLS 1.3 engine supports post-handshake key update (RFC 8446 section 4.6.3): call `DtlsConnection.UpdateKeyAsync(requestPeerUpdate)` to rotate the sending keys to the next application traffic generation (incrementing the epoch). With `requestPeerUpdate: true`, the peer also updates and returns a KeyUpdate. Inbound KeyUpdate messages are handled automatically. KeyUpdate is a DTLS 1.3 feature; the native 1.0/1.2 backends throw `NotSupportedException`.
 
 ## Interoperability status
 

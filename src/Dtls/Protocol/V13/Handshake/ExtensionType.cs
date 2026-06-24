@@ -32,4 +32,7 @@ internal enum ExtensionType : ushort
 
     /// <summary>key_share (51).</summary>
     KeyShare = 51,
+
+    /// <summary>connection_id (54, RFC 9146).</summary>
+    ConnectionId = 54,
 }

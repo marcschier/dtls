@@ -1,8 +1,10 @@
 using System;
 using System.Buffers;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Dtls.Crypto;
+using Dtls.Protocol.V13.Handshake;
 using Dtls.Transport;
 
 namespace Dtls.Protocol.V13;
@@ -15,26 +17,47 @@ namespace Dtls.Protocol.V13;
 /// </summary>
 internal sealed class Dtls13Connection : DtlsConnection
 {
-    private const ushort ApplicationEpoch = 3;
+    private const ushort InitialApplicationEpoch = 3;
 
     private readonly IDatagramTransport _transport;
-    private readonly Dtls13RecordProtector _sendProtector;
-    private readonly Dtls13RecordProtector _receiveProtector;
+    private readonly Dtls13CipherSuite _suite;
+    private readonly HashAlgorithmName _hash;
     private readonly int _maxDatagramSize;
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
+    private Dtls13RecordProtector _sendProtector;
+    private Dtls13RecordProtector _receiveProtector;
+    private byte[] _sendSecret;
+    private byte[] _receiveSecret;
+    private readonly byte[] _sendConnectionId;
+    private readonly int _receiveConnectionIdLength;
+    private ushort _sendEpoch = InitialApplicationEpoch;
+    private ushort _receiveEpoch = InitialApplicationEpoch;
     private ulong _sendSequence;
+    private ushort _postHandshakeSendSequence;
+    private bool _pendingKeyUpdateResponse;
     private bool _peerClosed;
     private bool _disposed;
 
-    public Dtls13Connection(
+    private Dtls13Connection(
         IDatagramTransport transport,
+        Dtls13CipherSuite suite,
         Dtls13RecordProtector sendProtector,
-        Dtls13RecordProtector receiveProtector)
+        Dtls13RecordProtector receiveProtector,
+        byte[] sendSecret,
+        byte[] receiveSecret,
+        byte[] sendConnectionId,
+        int receiveConnectionIdLength)
     {
-        _transport = transport ?? throw new ArgumentNullException(nameof(transport));
-        _sendProtector = sendProtector ?? throw new ArgumentNullException(nameof(sendProtector));
-        _receiveProtector = receiveProtector
-            ?? throw new ArgumentNullException(nameof(receiveProtector));
+        _transport = transport;
+        _suite = suite;
+        _hash = suite.HashAlgorithm;
+        _sendProtector = sendProtector;
+        _receiveProtector = receiveProtector;
+        _sendSecret = sendSecret;
+        _receiveSecret = receiveSecret;
+        _sendConnectionId = sendConnectionId;
+        _receiveConnectionIdLength = receiveConnectionIdLength;
         _maxDatagramSize = transport.MaxDatagramSize;
     }
 
@@ -43,22 +66,35 @@ internal sealed class Dtls13Connection : DtlsConnection
 
     /// <summary>
     /// Creates a connection, deriving the epoch-3 send/receive record protectors from the
-    /// supplied application traffic secrets. Ownership of the protectors stays with the
-    /// returned connection.
+    /// supplied application traffic secrets. The secrets are copied so the caller may zero its
+    /// own copies; the connection retains them to advance keys on KeyUpdate. When a Connection ID
+    /// was negotiated (RFC 9146), <paramref name="sendConnectionId"/> is placed on outbound records
+    /// and inbound records are parsed expecting <paramref name="receiveConnectionIdLength"/> CID
+    /// bytes.
     /// </summary>
     public static Dtls13Connection Create(
         IDatagramTransport transport,
         Dtls13CipherSuite suite,
         ReadOnlySpan<byte> sendSecret,
-        ReadOnlySpan<byte> receiveSecret)
+        ReadOnlySpan<byte> receiveSecret,
+        ReadOnlySpan<byte> sendConnectionId = default,
+        int receiveConnectionIdLength = 0)
     {
         Dtls13RecordProtector? send = null;
         Dtls13RecordProtector? receive = null;
         try
         {
-            send = BuildProtector(suite, sendSecret);
-            receive = BuildProtector(suite, receiveSecret);
-            Dtls13Connection connection = new(transport, send, receive);
+            send = BuildProtector(suite, sendSecret, 0);
+            receive = BuildProtector(suite, receiveSecret, receiveConnectionIdLength);
+            Dtls13Connection connection = new(
+                transport,
+                suite,
+                send,
+                receive,
+                sendSecret.ToArray(),
+                receiveSecret.ToArray(),
+                sendConnectionId.ToArray(),
+                receiveConnectionIdLength);
             send = null;
             receive = null;
             return connection;
@@ -72,9 +108,11 @@ internal sealed class Dtls13Connection : DtlsConnection
 
     private static Dtls13RecordProtector BuildProtector(
         Dtls13CipherSuite suite,
-        ReadOnlySpan<byte> trafficSecret)
+        ReadOnlySpan<byte> trafficSecret,
+        int connectionIdLength)
     {
-        return new Dtls13RecordProtector(Dtls13RecordKeys.Derive(suite, trafficSecret));
+        return new Dtls13RecordProtector(
+            Dtls13RecordKeys.Derive(suite, trafficSecret), connectionIdLength);
     }
 
     /// <inheritdoc />
@@ -84,19 +122,58 @@ internal sealed class Dtls13Connection : DtlsConnection
     {
         ThrowIfDisposed();
 
+        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await SendRecordLockedAsync(
+                    Dtls13PlaintextRecord.ApplicationDataContentType, data, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public override async ValueTask UpdateKeyAsync(
+        bool requestPeerUpdate = false,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await SendKeyUpdateLockedAsync(requestPeerUpdate, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    // Seals one record at the current send epoch and transmits it. The caller holds _sendLock.
+    private async ValueTask SendRecordLockedAsync(
+        byte contentType,
+        ReadOnlyMemory<byte> payload,
+        CancellationToken cancellationToken)
+    {
         ulong sequenceNumber = _sendSequence;
         _sendSequence++;
 
-        int sealedLength = _sendProtector.GetSealedLength(0, sequenceNumber, data.Length);
+        int sealedLength = _sendProtector.GetSealedLength(
+            _sendConnectionId.Length, sequenceNumber, payload.Length);
         byte[] buffer = ArrayPool<byte>.Shared.Rent(sealedLength);
         try
         {
             int written = _sendProtector.Seal(
-                ApplicationEpoch,
+                _sendEpoch,
                 sequenceNumber,
-                Dtls13PlaintextRecord.ApplicationDataContentType,
-                data.Span,
-                ReadOnlySpan<byte>.Empty,
+                contentType,
+                payload.Span,
+                _sendConnectionId,
                 buffer);
 
             await _transport.SendAsync(buffer.AsMemory(0, written), cancellationToken)
@@ -106,6 +183,50 @@ internal sealed class Dtls13Connection : DtlsConnection
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
+    }
+
+    // Sends a KeyUpdate handshake message then advances this endpoint's send keys. Holds _sendLock.
+    private async ValueTask SendKeyUpdateLockedAsync(
+        bool requestPeerUpdate,
+        CancellationToken cancellationToken)
+    {
+        byte[] body = { requestPeerUpdate ? (byte)1 : (byte)0 };
+        byte[] message = HandshakeMessage.Serialize(
+            HandshakeType.KeyUpdate, _postHandshakeSendSequence, body);
+        _postHandshakeSendSequence++;
+
+        await SendRecordLockedAsync(
+                Dtls13PlaintextRecord.HandshakeContentType, message, cancellationToken)
+            .ConfigureAwait(false);
+
+        AdvanceSendKeys();
+    }
+
+    private void AdvanceSendKeys()
+    {
+        byte[] next = Dtls13KeySchedule.NextApplicationTrafficSecret(_hash, _sendSecret);
+        CryptographicOperations.ZeroMemory(_sendSecret);
+        _sendSecret = next;
+
+        Dtls13RecordProtector previous = _sendProtector;
+        _sendProtector = BuildProtector(_suite, _sendSecret, 0);
+        previous.Dispose();
+
+        _sendEpoch++;
+        _sendSequence = 0;
+    }
+
+    private void AdvanceReceiveKeys()
+    {
+        byte[] next = Dtls13KeySchedule.NextApplicationTrafficSecret(_hash, _receiveSecret);
+        CryptographicOperations.ZeroMemory(_receiveSecret);
+        _receiveSecret = next;
+
+        Dtls13RecordProtector previous = _receiveProtector;
+        _receiveProtector = BuildProtector(_suite, _receiveSecret, _receiveConnectionIdLength);
+        previous.Dispose();
+
+        _receiveEpoch++;
     }
 
     /// <inheritdoc />
@@ -148,6 +269,21 @@ internal sealed class Dtls13Connection : DtlsConnection
 
                     return plaintextLength;
                 }
+
+                if (_pendingKeyUpdateResponse)
+                {
+                    _pendingKeyUpdateResponse = false;
+                    await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        await SendKeyUpdateLockedAsync(false, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        _sendLock.Release();
+                    }
+                }
             }
         }
         finally
@@ -168,7 +304,8 @@ internal sealed class Dtls13Connection : DtlsConnection
         ReadOnlySpan<byte> remaining = datagram;
         while (!remaining.IsEmpty)
         {
-            if (!Dtls13RecordHeader.TryParse(remaining, 0, out var header))
+            if (!Dtls13RecordHeader.TryParse(
+                    remaining, _receiveConnectionIdLength, out var header))
             {
                 return false;
             }
@@ -211,7 +348,12 @@ internal sealed class Dtls13Connection : DtlsConnection
                     return true;
                 }
 
-                // Ignore handshake/ack records during the application-data phase.
+                if (contentType == Dtls13PlaintextRecord.HandshakeContentType)
+                {
+                    HandleInboundHandshake(plaintext);
+                }
+
+                // Other post-handshake records (e.g. ACKs) are ignored here.
             }
             finally
             {
@@ -231,28 +373,40 @@ internal sealed class Dtls13Connection : DtlsConnection
         }
 
         // alert: level=warning(1), description=close_notify(0).
-        ReadOnlySpan<byte> closeNotify = stackalloc byte[] { 1, (byte)DtlsAlert.CloseNotify };
-        ulong sequenceNumber = _sendSequence;
-        _sendSequence++;
-
-        int sealedLength = _sendProtector.GetSealedLength(0, sequenceNumber, closeNotify.Length);
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(sealedLength);
+        byte[] closeNotify = { 1, (byte)DtlsAlert.CloseNotify };
+        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            int written = _sendProtector.Seal(
-                ApplicationEpoch,
-                sequenceNumber,
-                Dtls13PlaintextRecord.AlertContentType,
-                closeNotify,
-                ReadOnlySpan<byte>.Empty,
-                buffer);
-
-            await _transport.SendAsync(buffer.AsMemory(0, written), cancellationToken)
+            await SendRecordLockedAsync(
+                    Dtls13PlaintextRecord.AlertContentType, closeNotify, cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            _sendLock.Release();
+        }
+    }
+
+    private void HandleInboundHandshake(ReadOnlySpan<byte> plaintext)
+    {
+        if (!HandshakeMessage.TryParse(
+                plaintext, out HandshakeMessageHeader header, out ReadOnlySpan<byte> body))
+        {
+            return;
+        }
+
+        if (header.MessageType != HandshakeType.KeyUpdate || body.Length < 1)
+        {
+            return;
+        }
+
+        AdvanceReceiveKeys();
+
+        // update_requested(1): respond with our own KeyUpdate (sent from the receive loop). The
+        // response always uses update_not_requested to avoid an update loop (RFC 8446 §4.6.3).
+        if (body[0] == 1)
+        {
+            _pendingKeyUpdateResponse = true;
         }
     }
 
@@ -276,8 +430,11 @@ internal sealed class Dtls13Connection : DtlsConnection
         {
             _sendProtector.Dispose();
             _receiveProtector.Dispose();
+            _sendLock.Dispose();
         }
 
+        CryptographicOperations.ZeroMemory(_sendSecret);
+        CryptographicOperations.ZeroMemory(_receiveSecret);
         _disposed = true;
     }
 }

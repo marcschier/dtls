@@ -50,6 +50,9 @@ internal static class Dtls13ServerHandshake
         HashAlgorithmName hash = suite.HashAlgorithm;
         NamedGroup group = SelectGroup(clientHello, out byte[] clientKeyShare);
 
+        (byte[] serverConnectionId, byte[] clientConnectionId) =
+            NegotiateConnectionId(options, clientHello);
+
         if (UseCertificate(options, clientHello))
         {
             CertificateType certificateType = SelectServerCertificateType(
@@ -66,6 +69,8 @@ internal static class Dtls13ServerHandshake
                     clientKeyShare,
                     certificateType,
                     emitCertificateTypeExtension,
+                    serverConnectionId,
+                    clientConnectionId,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -79,8 +84,52 @@ internal static class Dtls13ServerHandshake
                 hash,
                 group,
                 clientKeyShare,
+                serverConnectionId,
+                clientConnectionId,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static (byte[] ServerCid, byte[] ClientCid) NegotiateConnectionId(
+        DtlsServerOptions options, ClientHello clientHello)
+    {
+        if (!options.UseConnectionId
+            || clientHello.Extensions is null
+            || !ExtensionList.TryFind(
+                clientHello.Extensions,
+                ExtensionType.ConnectionId,
+                out HandshakeExtension extension)
+            || !ConnectionIdExtension.TryParse(extension.Data, out byte[] clientCid))
+        {
+            return (Array.Empty<byte>(), Array.Empty<byte>());
+        }
+
+        byte[] serverCid = new byte[8];
+        RandomNumberGenerator.Fill(serverCid);
+        return (serverCid, clientCid);
+    }
+
+    private static Dtls13Connection CreateServerConnection(
+        IDatagramTransport transport,
+        Dtls13CipherSuite suite,
+        byte[] serverApplicationSecret,
+        byte[] clientApplicationSecret,
+        byte[] serverConnectionId,
+        byte[] clientConnectionId)
+    {
+        if (serverConnectionId.Length > 0)
+        {
+            return Dtls13Connection.Create(
+                transport,
+                suite,
+                serverApplicationSecret,
+                clientApplicationSecret,
+                sendConnectionId: clientConnectionId,
+                receiveConnectionIdLength: serverConnectionId.Length);
+        }
+
+        return Dtls13Connection.Create(
+            transport, suite, serverApplicationSecret, clientApplicationSecret);
     }
 
     private static async Task<DtlsConnection> RunPskAsync(
@@ -92,6 +141,8 @@ internal static class Dtls13ServerHandshake
         HashAlgorithmName hash,
         NamedGroup group,
         byte[] clientKeyShare,
+        byte[] serverConnectionId,
+        byte[] clientConnectionId,
         CancellationToken cancellationToken)
     {
         if (!HasPskDheKeMode(clientHello))
@@ -121,7 +172,7 @@ internal static class Dtls13ServerHandshake
             secrets.Add(ecdheSecret);
 
             byte[] serverHelloBody = BuildServerHelloBody(
-                suite, group, serverKeyShare, selectedIdentity);
+                suite, group, serverKeyShare, selectedIdentity, serverConnectionId);
             transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
             byte[] serverHelloMessage = HandshakeMessage.Serialize(
@@ -187,7 +238,8 @@ internal static class Dtls13ServerHandshake
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            return Dtls13Connection.Create(transport, suite, serverAp, clientAp);
+            return CreateServerConnection(
+                transport, suite, serverAp, clientAp, serverConnectionId, clientConnectionId);
         }
         finally
         {
@@ -211,6 +263,8 @@ internal static class Dtls13ServerHandshake
         byte[] clientKeyShare,
         CertificateType certificateType,
         bool emitCertificateTypeExtension,
+        byte[] serverConnectionId,
+        byte[] clientConnectionId,
         CancellationToken cancellationToken)
     {
         SignatureScheme scheme = SelectSignatureScheme(clientHello, certificate);
@@ -231,7 +285,8 @@ internal static class Dtls13ServerHandshake
             byte[] ecdheSecret = ecdhe.DeriveSharedSecret(clientKeyShare);
             secrets.Add(ecdheSecret);
 
-            byte[] serverHelloBody = BuildCertificateServerHelloBody(suite, group, serverKeyShare);
+            byte[] serverHelloBody = BuildCertificateServerHelloBody(
+                suite, group, serverKeyShare, serverConnectionId);
             transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
             byte[] serverHelloMessage = HandshakeMessage.Serialize(
@@ -303,7 +358,8 @@ internal static class Dtls13ServerHandshake
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            return Dtls13Connection.Create(transport, suite, serverAp, clientAp);
+            return CreateServerConnection(
+                transport, suite, serverAp, clientAp, serverConnectionId, clientConnectionId);
         }
         finally
         {
@@ -631,7 +687,8 @@ internal static class Dtls13ServerHandshake
         Dtls13CipherSuite suite,
         NamedGroup group,
         byte[] serverKeyShare,
-        ushort selectedIdentity)
+        ushort selectedIdentity,
+        byte[] serverConnectionId)
     {
         byte[] random = new byte[ServerHello.RandomLength];
         RandomNumberGenerator.Fill(random);
@@ -649,6 +706,8 @@ internal static class Dtls13ServerHandshake
                 PreSharedKeyExtension.EncodeServerHello(selectedIdentity)),
         };
 
+        AddConnectionIdExtension(extensions, serverConnectionId);
+
         ServerHello serverHello = new()
         {
             Random = random,
@@ -661,7 +720,8 @@ internal static class Dtls13ServerHandshake
     private static byte[] BuildCertificateServerHelloBody(
         Dtls13CipherSuite suite,
         NamedGroup group,
-        byte[] serverKeyShare)
+        byte[] serverKeyShare,
+        byte[] serverConnectionId)
     {
         byte[] random = new byte[ServerHello.RandomLength];
         RandomNumberGenerator.Fill(random);
@@ -676,6 +736,8 @@ internal static class Dtls13ServerHandshake
                 KeyShareExtension.EncodeServerHello(new KeyShareEntry(group, serverKeyShare))),
         };
 
+        AddConnectionIdExtension(extensions, serverConnectionId);
+
         ServerHello serverHello = new()
         {
             Random = random,
@@ -683,6 +745,16 @@ internal static class Dtls13ServerHandshake
             Extensions = extensions,
         };
         return serverHello.Encode();
+    }
+
+    private static void AddConnectionIdExtension(
+        List<HandshakeExtension> extensions, byte[] serverConnectionId)
+    {
+        if (serverConnectionId.Length > 0)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ConnectionId, ConnectionIdExtension.Encode(serverConnectionId)));
+        }
     }
 
     private static async Task<byte[]> ReceiveDatagramAsync(

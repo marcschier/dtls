@@ -39,6 +39,21 @@ public abstract class DtlsConnection : IDisposable
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     public abstract ValueTask CloseAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Initiates a post-handshake key update (RFC 8446 section 4.6.3 / RFC 9147), rotating this
+    /// endpoint's send keys to the next generation and incrementing its epoch. When
+    /// <paramref name="requestPeerUpdate"/> is <see langword="true"/>, the peer is asked to update
+    /// and send its own KeyUpdate in return. Only DTLS 1.3 connections support this; other
+    /// versions throw <see cref="NotSupportedException"/>.
+    /// </summary>
+    /// <param name="requestPeerUpdate">Whether to ask the peer to update its keys too.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    public virtual ValueTask UpdateKeyAsync(
+        bool requestPeerUpdate = false,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException(
+            "KeyUpdate is only supported for DTLS 1.3 connections.");
+
     /// <inheritdoc />
     public void Dispose()
     {

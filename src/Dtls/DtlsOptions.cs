@@ -29,6 +29,13 @@ public abstract class DtlsOptions
     public bool AllowDeprecatedDtls10 { get; init; }
 
     /// <summary>
+    /// Whether to negotiate a DTLS 1.3 Connection ID (RFC 9146), letting the connection stay
+    /// associated with its cryptographic state when the peer's address changes. Only applies to
+    /// the managed DTLS 1.3 path; ignored by the native DTLS 1.0/1.2 backends.
+    /// </summary>
+    public bool UseConnectionId { get; init; }
+
+    /// <summary>
     /// The maximum reassembled handshake message size, in bytes. Bounds memory used while
     /// reassembling fragmented flights. Defaults to 64 KiB.
     /// </summary>

@@ -28,6 +28,8 @@ internal static class Dtls13KeySchedule
 
     private static readonly byte[] FinishedLabel = Encoding.ASCII.GetBytes("finished");
 
+    private static readonly byte[] TrafficUpdateLabel = Encoding.ASCII.GetBytes("traffic upd");
+
     /// <summary>
     /// Early Secret = HKDF-Extract(0, PSK). An empty PSK yields the (EC)DHE-only baseline.
     /// </summary>
@@ -106,6 +108,20 @@ internal static class Dtls13KeySchedule
         ReadOnlySpan<byte> masterSecret,
         ReadOnlySpan<byte> transcriptHash) =>
         KeySchedule.DeriveSecret(hash, masterSecret, ServerApplicationTrafficLabel, transcriptHash);
+
+    /// <summary>
+    /// application_traffic_secret_N+1 = HKDF-Expand-Label(secret_N, "traffic upd", "",
+    /// Hash.length) (RFC 8446 section 7.2). Advances the application traffic keys for KeyUpdate.
+    /// </summary>
+    public static byte[] NextApplicationTrafficSecret(
+        HashAlgorithmName hash,
+        ReadOnlySpan<byte> currentSecret) =>
+        KeySchedule.ExpandLabel(
+            hash,
+            currentSecret,
+            TrafficUpdateLabel,
+            ReadOnlySpan<byte>.Empty,
+            Hkdf.HashLength(hash));
 
     /// <summary>
     /// finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)

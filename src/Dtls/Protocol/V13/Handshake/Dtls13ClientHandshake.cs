@@ -83,8 +83,10 @@ internal static class Dtls13ClientHandshake
             secrets.Add(early);
             secrets.Add(binderKey);
 
+            byte[] clientConnectionId = NewConnectionId(options);
             byte[] clientHelloBody = BuildClientHelloBody(
-                random, group, keyShare, identity, hash, binderKey, offeredIds);
+                random, group, keyShare, identity, hash, binderKey, offeredIds,
+                clientConnectionId);
 
             TranscriptHash transcript = new(hash);
             transcript.AppendMessage(HandshakeType.ClientHello, clientHelloBody);
@@ -164,7 +166,8 @@ internal static class Dtls13ClientHandshake
             secrets.Add(clientAp);
             secrets.Add(serverAp);
 
-            return Dtls13Connection.Create(transport, suite, clientAp, serverAp);
+            return CreateClientConnection(
+                transport, suite, clientAp, serverAp, clientConnectionId, serverHello);
         }
         finally
         {
@@ -196,8 +199,10 @@ internal static class Dtls13ClientHandshake
             byte[] random = new byte[ClientHello.RandomLength];
             RandomNumberGenerator.Fill(random);
 
+            byte[] clientConnectionId = NewConnectionId(options);
             byte[] clientHelloBody = BuildCertificateClientHelloBody(
-                random, group, keyShare, offeredIds, options.AllowRawPublicKeys);
+                random, group, keyShare, offeredIds, options.AllowRawPublicKeys,
+                clientConnectionId);
 
             byte[] clientHelloMessage = HandshakeMessage.Serialize(
                 HandshakeType.ClientHello, 0, clientHelloBody);
@@ -330,7 +335,8 @@ internal static class Dtls13ClientHandshake
             secrets.Add(clientAp);
             secrets.Add(serverAp);
 
-            return Dtls13Connection.Create(transport, suite, clientAp, serverAp);
+            return CreateClientConnection(
+                transport, suite, clientAp, serverAp, clientConnectionId, serverHello);
         }
         finally
         {
@@ -552,12 +558,13 @@ internal static class Dtls13ClientHandshake
         byte[] identity,
         HashAlgorithmName hash,
         byte[] binderKey,
-        ushort[] offeredIds)
+        ushort[] offeredIds,
+        byte[] connectionId)
     {
         int hashLength = Hkdf.HashLength(hash);
         byte[] placeholder = new byte[hashLength];
         byte[] bodyWithPlaceholder = EncodeClientHelloBody(
-            random, group, keyShare, identity, placeholder, offeredIds);
+            random, group, keyShare, identity, placeholder, offeredIds, connectionId);
 
         byte[] transcriptBytes = HandshakeMessage.ToTranscriptBytes(
             HandshakeType.ClientHello, bodyWithPlaceholder);
@@ -573,7 +580,8 @@ internal static class Dtls13ClientHandshake
         }
 
         byte[] binder = Dtls13KeySchedule.ComputeBinder(hash, binderKey, truncatedHash);
-        return EncodeClientHelloBody(random, group, keyShare, identity, binder, offeredIds);
+        return EncodeClientHelloBody(
+            random, group, keyShare, identity, binder, offeredIds, connectionId);
     }
 
     private static byte[] EncodeClientHelloBody(
@@ -582,7 +590,8 @@ internal static class Dtls13ClientHandshake
         byte[] keyShare,
         byte[] identity,
         byte[] binder,
-        ushort[] offeredIds)
+        ushort[] offeredIds,
+        byte[] connectionId)
     {
         List<HandshakeExtension> extensions = new()
         {
@@ -601,12 +610,20 @@ internal static class Dtls13ClientHandshake
                 ExtensionType.PskKeyExchangeModes,
                 PskKeyExchangeModesExtension.Encode(
                     new[] { PskKeyExchangeMode.PskDheKe })),
-            new HandshakeExtension(
-                ExtensionType.PreSharedKey,
-                PreSharedKeyExtension.EncodeClientHello(
-                    new[] { new PskIdentity(identity, 0) },
-                    new[] { binder })),
         };
+
+        if (connectionId.Length > 0)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ConnectionId, ConnectionIdExtension.Encode(connectionId)));
+        }
+
+        // pre_shared_key must be the last extension (RFC 8446 section 4.2.11).
+        extensions.Add(new HandshakeExtension(
+            ExtensionType.PreSharedKey,
+            PreSharedKeyExtension.EncodeClientHello(
+                new[] { new PskIdentity(identity, 0) },
+                new[] { binder })));
 
         ClientHello clientHello = new()
         {
@@ -622,7 +639,8 @@ internal static class Dtls13ClientHandshake
         NamedGroup group,
         byte[] keyShare,
         ushort[] offeredIds,
-        bool offerRawPublicKey)
+        bool offerRawPublicKey,
+        byte[] connectionId)
     {
         List<HandshakeExtension> extensions = new()
         {
@@ -650,6 +668,12 @@ internal static class Dtls13ClientHandshake
                     new[] { CertificateType.RawPublicKey, CertificateType.X509 })));
         }
 
+        if (connectionId.Length > 0)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ConnectionId, ConnectionIdExtension.Encode(connectionId)));
+        }
+
         ClientHello clientHello = new()
         {
             Random = random,
@@ -657,6 +681,55 @@ internal static class Dtls13ClientHandshake
             Extensions = extensions,
         };
         return clientHello.Encode();
+    }
+
+    private static byte[] NewConnectionId(DtlsOptions options)
+    {
+        if (!options.UseConnectionId)
+        {
+            return Array.Empty<byte>();
+        }
+
+        byte[] cid = new byte[8];
+        RandomNumberGenerator.Fill(cid);
+        return cid;
+    }
+
+    private static byte[]? ExtractConnectionId(ServerHello serverHello)
+    {
+        if (serverHello.Extensions is { } extensions
+            && ExtensionList.TryFind(
+                extensions, ExtensionType.ConnectionId, out HandshakeExtension extension)
+            && ConnectionIdExtension.TryParse(extension.Data, out byte[] cid))
+        {
+            return cid;
+        }
+
+        return null;
+    }
+
+    private static Dtls13Connection CreateClientConnection(
+        IDatagramTransport transport,
+        Dtls13CipherSuite suite,
+        byte[] clientApplicationSecret,
+        byte[] serverApplicationSecret,
+        byte[] clientConnectionId,
+        ServerHello serverHello)
+    {
+        byte[]? serverConnectionId = ExtractConnectionId(serverHello);
+        if (clientConnectionId.Length > 0 && serverConnectionId is not null)
+        {
+            return Dtls13Connection.Create(
+                transport,
+                suite,
+                clientApplicationSecret,
+                serverApplicationSecret,
+                sendConnectionId: serverConnectionId,
+                receiveConnectionIdLength: clientConnectionId.Length);
+        }
+
+        return Dtls13Connection.Create(
+            transport, suite, clientApplicationSecret, serverApplicationSecret);
     }
 
     private static byte[] ExtractServerKeyShare(ServerHello serverHello, NamedGroup expectedGroup)
