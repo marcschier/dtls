@@ -24,9 +24,9 @@ namespace Dtls.Protocol.V13.Handshake;
 /// HelloRetryRequest cookie exchange (<see cref="DtlsServerOptions.EnableStatelessRetry"/>).
 /// Handshake flights are driven through a <see cref="Dtls13FlightTransceiver"/> that retransmits
 /// on loss and de-duplicates retransmitted peer flights (RFC 9147 section 5.8); the client's final
-/// flight is acknowledged (section 7). Deferred (not implemented here): handshake message
-/// fragmentation across datagrams (single-datagram flights are assumed) and 0-RTT. The external-PSK
-/// path does not emit a HelloRetryRequest.
+/// flight is acknowledged (section 7), and messages larger than the transport MTU are fragmented
+/// and reassembled (section 5.5; a fragmented ClientHello is reassembled before routing). Deferred
+/// (not implemented here): 0-RTT. The external-PSK path does not emit a HelloRetryRequest.
 /// </remarks>
 internal static class Dtls13ServerHandshake
 {
@@ -74,6 +74,7 @@ internal static class Dtls13ServerHandshake
                         suite,
                         group,
                         serverConnectionId,
+                        options.MaxHandshakeMessageSize,
                         cancellationToken)
                     .ConfigureAwait(false);
                 clientHello = retry.ClientHello;
@@ -102,6 +103,7 @@ internal static class Dtls13ServerHandshake
                     options.RequireClientCertificate,
                     options.ClientCertificateValidation,
                     transcriptPrefix,
+                    options.MaxHandshakeMessageSize,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -117,6 +119,7 @@ internal static class Dtls13ServerHandshake
                 clientKeyShare,
                 serverConnectionId,
                 clientConnectionId,
+                options.MaxHandshakeMessageSize,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -162,6 +165,7 @@ internal static class Dtls13ServerHandshake
         Dtls13CipherSuite suite,
         NamedGroup group,
         byte[] serverConnectionId,
+        int maxHandshakeMessageSize,
         CancellationToken cancellationToken)
     {
         HashAlgorithmName hash = suite.HashAlgorithm;
@@ -189,17 +193,15 @@ internal static class Dtls13ServerHandshake
             byte[] helloRetryBody = BuildHelloRetryRequestBody(
                 suite, changeGroup ? expectedGroup : (NamedGroup?)null, cookie, serverConnectionId);
 
-            byte[] helloRetryMessage = HandshakeMessage.Serialize(
-                HandshakeType.ServerHello, 0, helloRetryBody);
-            byte[] helloRetryRecord = Dtls13PlaintextRecord.Encode(
-                Dtls13PlaintextRecord.HandshakeContentType, 0, 0, helloRetryMessage);
-            await transceiver.SendAsync(helloRetryRecord, cancellationToken).ConfigureAwait(false);
-
-            byte[] clientHello2Datagram = await transceiver.ReceiveFlightAsync(cancellationToken)
+            await Dtls13HandshakeFlight.SendPlaintextAsync(
+                    transceiver, HandshakeType.ServerHello, 0, helloRetryBody, 0, cancellationToken)
                 .ConfigureAwait(false);
-            if (!Dtls13HandshakeRecords.TryReadPlaintextHandshake(
-                    clientHello2Datagram, out HandshakeType ch2Type, out byte[] clientHello2Body)
-                || ch2Type != HandshakeType.ClientHello
+
+            (HandshakeType ch2Type, byte[] clientHello2Body) = await Dtls13HandshakeFlight
+                .ReceivePlaintextHandshakeAsync(
+                    transceiver, 1, maxHandshakeMessageSize, cancellationToken)
+                .ConfigureAwait(false);
+            if (ch2Type != HandshakeType.ClientHello
                 || !ClientHello.TryParse(clientHello2Body, out ClientHello clientHello2))
             {
                 throw new DtlsAlertException(
@@ -376,6 +378,7 @@ internal static class Dtls13ServerHandshake
         byte[] clientKeyShare,
         byte[] serverConnectionId,
         byte[] clientConnectionId,
+        int maxHandshakeMessageSize,
         CancellationToken cancellationToken)
     {
         if (!HasPskDheKeMode(clientHello))
@@ -386,8 +389,6 @@ internal static class Dtls13ServerHandshake
 
         List<byte[]> secrets = new();
         using EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
-        Dtls13RecordProtector? sendHandshake = null;
-        Dtls13RecordProtector? recvHandshake = null;
         try
         {
             ushort selectedIdentity = ResolveAndVerifyPsk(
@@ -408,11 +409,9 @@ internal static class Dtls13ServerHandshake
                 suite, group, serverKeyShare, selectedIdentity, serverConnectionId);
             transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
-            byte[] serverHelloMessage = HandshakeMessage.Serialize(
-                HandshakeType.ServerHello, 0, serverHelloBody);
-            byte[] serverHelloRecord = Dtls13PlaintextRecord.Encode(
-                Dtls13PlaintextRecord.HandshakeContentType, 0, 0, serverHelloMessage);
-            await transceiver.SendAsync(serverHelloRecord, cancellationToken)
+            await Dtls13HandshakeFlight.SendPlaintextAsync(
+                    transceiver, HandshakeType.ServerHello, 0, serverHelloBody, 0,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             byte[] handshakeSecret = Dtls13KeySchedule.DeriveHandshakeSecret(
@@ -427,8 +426,10 @@ internal static class Dtls13ServerHandshake
             secrets.Add(clientHsSecret);
             secrets.Add(serverHsSecret);
 
-            sendHandshake = Dtls13HandshakeRecords.CreateProtector(suite, serverHsSecret);
-            recvHandshake = Dtls13HandshakeRecords.CreateProtector(suite, clientHsSecret);
+            using Dtls13RecordProtector sendHandshake =
+                Dtls13HandshakeRecords.CreateProtector(suite, serverHsSecret);
+            using Dtls13RecordProtector recvHandshake =
+                Dtls13HandshakeRecords.CreateProtector(suite, clientHsSecret);
 
             byte[] encryptedExtensionsBody = EncryptedExtensions.Encode(
                 Array.Empty<HandshakeExtension>());
@@ -439,19 +440,21 @@ internal static class Dtls13ServerHandshake
                 hash, serverHsSecret, transcriptChEe);
             transcript.AppendMessage(HandshakeType.Finished, serverFinished);
 
-            byte[] eeMessage = HandshakeMessage.Serialize(
-                HandshakeType.EncryptedExtensions, 1, encryptedExtensionsBody);
-            byte[] finishedMessage = HandshakeMessage.Serialize(
-                HandshakeType.Finished, 2, serverFinished);
-            byte[] eeRecord = Dtls13HandshakeRecords.SealHandshakeRecord(
-                sendHandshake, 0, eeMessage);
-            byte[] finishedRecord = Dtls13HandshakeRecords.SealHandshakeRecord(
-                sendHandshake, 1, finishedMessage);
+            List<OutboundHandshakeMessage> flightMessages = new()
+            {
+                new OutboundHandshakeMessage(
+                    HandshakeType.EncryptedExtensions, 1, encryptedExtensionsBody),
+                new OutboundHandshakeMessage(HandshakeType.Finished, 2, serverFinished),
+            };
 
-            byte[] flight = new byte[eeRecord.Length + finishedRecord.Length];
-            eeRecord.CopyTo(flight, 0);
-            finishedRecord.CopyTo(flight, eeRecord.Length);
-            await transceiver.SendAsync(flight, cancellationToken).ConfigureAwait(false);
+            (List<byte[]> flightDatagrams, ulong ackSequence) =
+                Dtls13HandshakeFlight.BuildProtected(
+                    flightMessages, sendHandshake, transceiver.Transport.MaxDatagramSize, 0);
+            foreach (byte[] flightDatagram in flightDatagrams)
+            {
+                await transceiver.SendAsync(flightDatagram, cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
             byte[] transcriptChSf = transcript.CurrentHash();
             byte[] master = Dtls13KeySchedule.DeriveMasterSecret(hash, handshakeSecret);
@@ -469,11 +472,12 @@ internal static class Dtls13ServerHandshake
                     hash,
                     clientHsSecret,
                     transcriptChSf,
+                    maxHandshakeMessageSize,
                     cancellationToken)
                 .ConfigureAwait(false);
 
             await SendHandshakeAckAsync(
-                    transceiver, sendHandshake, recvHandshake, 2, cancellationToken)
+                    transceiver, sendHandshake, recvHandshake, ackSequence, cancellationToken)
                 .ConfigureAwait(false);
 
             return CreateServerConnection(
@@ -486,8 +490,6 @@ internal static class Dtls13ServerHandshake
         }
         finally
         {
-            sendHandshake?.Dispose();
-            recvHandshake?.Dispose();
             foreach (byte[] secret in secrets)
             {
                 CryptographicOperations.ZeroMemory(secret);
@@ -511,14 +513,13 @@ internal static class Dtls13ServerHandshake
         bool requireClientCertificate,
         DtlsRemoteCertificateValidation? clientCertificateValidation,
         byte[]? transcriptPrefix,
+        int maxHandshakeMessageSize,
         CancellationToken cancellationToken)
     {
         SignatureScheme scheme = SelectSignatureScheme(clientHello, certificate);
 
         List<byte[]> secrets = new();
         using EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
-        Dtls13RecordProtector? sendHandshake = null;
-        Dtls13RecordProtector? recvHandshake = null;
         try
         {
             TranscriptHash transcript = new(hash);
@@ -540,11 +541,9 @@ internal static class Dtls13ServerHandshake
                 suite, group, serverKeyShare, serverConnectionId);
             transcript.AppendMessage(HandshakeType.ServerHello, serverHelloBody);
 
-            byte[] serverHelloMessage = HandshakeMessage.Serialize(
-                HandshakeType.ServerHello, 0, serverHelloBody);
-            byte[] serverHelloRecord = Dtls13PlaintextRecord.Encode(
-                Dtls13PlaintextRecord.HandshakeContentType, 0, 0, serverHelloMessage);
-            await transceiver.SendAsync(serverHelloRecord, cancellationToken)
+            await Dtls13HandshakeFlight.SendPlaintextAsync(
+                    transceiver, HandshakeType.ServerHello, 0, serverHelloBody, 0,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             byte[] handshakeSecret = Dtls13KeySchedule.DeriveHandshakeSecret(
@@ -559,8 +558,10 @@ internal static class Dtls13ServerHandshake
             secrets.Add(clientHsSecret);
             secrets.Add(serverHsSecret);
 
-            sendHandshake = Dtls13HandshakeRecords.CreateProtector(suite, serverHsSecret);
-            recvHandshake = Dtls13HandshakeRecords.CreateProtector(suite, clientHsSecret);
+            using Dtls13RecordProtector sendHandshake =
+                Dtls13HandshakeRecords.CreateProtector(suite, serverHsSecret);
+            using Dtls13RecordProtector recvHandshake =
+                Dtls13HandshakeRecords.CreateProtector(suite, clientHsSecret);
 
             byte[] encryptedExtensionsBody = BuildCertificateEncryptedExtensions(
                 certificateType, emitCertificateTypeExtension);
@@ -591,14 +592,31 @@ internal static class Dtls13ServerHandshake
                 hash, serverHsSecret, transcriptThroughCv);
             transcript.AppendMessage(HandshakeType.Finished, serverFinished);
 
-            byte[] flight = BuildCertificateServerFlight(
-                sendHandshake,
-                encryptedExtensionsBody,
-                certificateRequestBody,
-                certificateBody,
-                certificateVerifyBody,
-                serverFinished);
-            await transceiver.SendAsync(flight, cancellationToken).ConfigureAwait(false);
+            List<OutboundHandshakeMessage> flightMessages = new();
+            ushort flightSequence = 1;
+            flightMessages.Add(new OutboundHandshakeMessage(
+                HandshakeType.EncryptedExtensions, flightSequence++, encryptedExtensionsBody));
+            if (certificateRequestBody is not null)
+            {
+                flightMessages.Add(new OutboundHandshakeMessage(
+                    HandshakeType.CertificateRequest, flightSequence++, certificateRequestBody));
+            }
+
+            flightMessages.Add(new OutboundHandshakeMessage(
+                HandshakeType.Certificate, flightSequence++, certificateBody));
+            flightMessages.Add(new OutboundHandshakeMessage(
+                HandshakeType.CertificateVerify, flightSequence++, certificateVerifyBody));
+            flightMessages.Add(new OutboundHandshakeMessage(
+                HandshakeType.Finished, flightSequence, serverFinished));
+
+            (List<byte[]> flightDatagrams, ulong ackSequence) =
+                Dtls13HandshakeFlight.BuildProtected(
+                    flightMessages, sendHandshake, transceiver.Transport.MaxDatagramSize, 0);
+            foreach (byte[] flightDatagram in flightDatagrams)
+            {
+                await transceiver.SendAsync(flightDatagram, cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
             byte[] transcriptChSf = transcript.CurrentHash();
             byte[] master = Dtls13KeySchedule.DeriveMasterSecret(hash, handshakeSecret);
@@ -619,6 +637,7 @@ internal static class Dtls13ServerHandshake
                         clientHsSecret,
                         transcript,
                         clientCertificateValidation,
+                        maxHandshakeMessageSize,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -630,11 +649,11 @@ internal static class Dtls13ServerHandshake
                         hash,
                         clientHsSecret,
                         transcriptChSf,
+                        maxHandshakeMessageSize,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
 
-            ulong ackSequence = requireClientCertificate ? 5UL : 4UL;
             await SendHandshakeAckAsync(
                     transceiver, sendHandshake, recvHandshake, ackSequence, cancellationToken)
                 .ConfigureAwait(false);
@@ -649,61 +668,11 @@ internal static class Dtls13ServerHandshake
         }
         finally
         {
-            sendHandshake?.Dispose();
-            recvHandshake?.Dispose();
             foreach (byte[] secret in secrets)
             {
                 CryptographicOperations.ZeroMemory(secret);
             }
         }
-    }
-
-    private static byte[] BuildCertificateServerFlight(
-        Dtls13RecordProtector protector,
-        byte[] encryptedExtensionsBody,
-        byte[]? certificateRequestBody,
-        byte[] certificateBody,
-        byte[] certificateVerifyBody,
-        byte[] serverFinished)
-    {
-        List<byte[]> records = new();
-        ushort messageSequence = 1;
-        ulong recordSequence = 0;
-
-        void Add(HandshakeType type, byte[] body)
-        {
-            byte[] message = HandshakeMessage.Serialize(type, messageSequence, body);
-            records.Add(Dtls13HandshakeRecords.SealHandshakeRecord(
-                protector, recordSequence, message));
-            messageSequence++;
-            recordSequence++;
-        }
-
-        Add(HandshakeType.EncryptedExtensions, encryptedExtensionsBody);
-        if (certificateRequestBody is not null)
-        {
-            Add(HandshakeType.CertificateRequest, certificateRequestBody);
-        }
-
-        Add(HandshakeType.Certificate, certificateBody);
-        Add(HandshakeType.CertificateVerify, certificateVerifyBody);
-        Add(HandshakeType.Finished, serverFinished);
-
-        int total = 0;
-        foreach (byte[] record in records)
-        {
-            total += record.Length;
-        }
-
-        byte[] flight = new byte[total];
-        int offset = 0;
-        foreach (byte[] record in records)
-        {
-            record.CopyTo(flight, offset);
-            offset += record.Length;
-        }
-
-        return flight;
     }
 
     private static readonly SignatureScheme[] ClientCertificateSchemes =
@@ -721,12 +690,18 @@ internal static class Dtls13ServerHandshake
         byte[] clientHsSecret,
         TranscriptHash transcript,
         DtlsRemoteCertificateValidation? clientCertificateValidation,
+        int maxHandshakeMessageSize,
         CancellationToken cancellationToken)
     {
-        byte[] datagram = await transceiver.ReceiveFlightAsync(cancellationToken)
+        HandshakeReassembler reassembler = new(maxHandshakeMessageSize, firstSequence: 1);
+        List<Dtls13HandshakeRecords.Message> flight = await Dtls13HandshakeFlight
+            .ReceiveProtectedAsync(
+                transceiver,
+                reassembler,
+                recvHandshake,
+                HandshakeType.Finished,
+                cancellationToken)
             .ConfigureAwait(false);
-        List<Dtls13HandshakeRecords.Message> flight =
-            Dtls13HandshakeRecords.OpenHandshakeFlight(datagram, recvHandshake);
 
         if (flight.Count < 2 || flight[0].Type != HandshakeType.Certificate)
         {
@@ -821,12 +796,18 @@ internal static class Dtls13ServerHandshake
         HashAlgorithmName hash,
         byte[] clientHsSecret,
         byte[] transcriptChSf,
+        int maxHandshakeMessageSize,
         CancellationToken cancellationToken)
     {
-        byte[] finishedDatagram = await transceiver.ReceiveFlightAsync(cancellationToken)
+        HandshakeReassembler reassembler = new(maxHandshakeMessageSize, firstSequence: 1);
+        List<Dtls13HandshakeRecords.Message> clientFlight = await Dtls13HandshakeFlight
+            .ReceiveProtectedAsync(
+                transceiver,
+                reassembler,
+                recvHandshake,
+                HandshakeType.Finished,
+                cancellationToken)
             .ConfigureAwait(false);
-        List<Dtls13HandshakeRecords.Message> clientFlight =
-            Dtls13HandshakeRecords.OpenHandshakeFlight(finishedDatagram, recvHandshake);
 
         if (clientFlight.Count < 1 || clientFlight[0].Type != HandshakeType.Finished)
         {

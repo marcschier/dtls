@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dtls.Interop;
 using Dtls.Protocol.V13;
+using Dtls.Protocol.V13.Handshake;
 using Dtls.Routing;
 using Dtls.Transport;
 
@@ -52,30 +53,88 @@ public sealed class DtlsServer
         {
             int received = await transport.ReceiveAsync(buffer, cancellationToken)
                 .ConfigureAwait(false);
-            DtlsRoute route = ClientHelloVersionPeek.Inspect(buffer.AsSpan(0, received));
+            byte[] initialDatagram = buffer.AsSpan(0, received).ToArray();
+            DtlsRoute route = ClientHelloVersionPeek.Inspect(initialDatagram);
+
+            if (route == DtlsRoute.Unknown)
+            {
+                // The ClientHello may be fragmented across datagrams (RFC 9147 section 5.5);
+                // reassemble it before routing so the offered version becomes observable.
+                byte[]? reassembled = await TryReassembleClientHelloAsync(
+                        transport, initialDatagram, cancellationToken)
+                    .ConfigureAwait(false);
+                if (reassembled is not null)
+                {
+                    initialDatagram = reassembled;
+                    route = ClientHelloVersionPeek.Inspect(initialDatagram);
+                }
+            }
 
             if (route == DtlsRoute.Managed13)
             {
                 return await ManagedDtls13Engine
-                    .AcceptAsync(
-                        transport,
-                        _options,
-                        buffer.AsSpan(0, received).ToArray(),
-                        cancellationToken)
+                    .AcceptAsync(transport, _options, initialDatagram, cancellationToken)
                     .ConfigureAwait(false);
             }
 
             if (route == DtlsRoute.NativeLegacy)
             {
-                return await AcceptNativeAsync(
-                        transport,
-                        buffer.AsSpan(0, received).ToArray(),
-                        cancellationToken)
+                return await AcceptNativeAsync(transport, initialDatagram, cancellationToken)
                     .ConfigureAwait(false);
             }
 
             throw new DtlsException(
                 "Unable to determine the DTLS version from the initial ClientHello.");
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    // Reassembles a ClientHello that was fragmented across datagrams (RFC 9147 section 5.5). The
+    // first datagram (already received) is offered, then further datagrams are read until the
+    // ClientHello is complete; the result is returned as a single-record plaintext datagram so the
+    // version peek and the handshake engines can consume it unchanged. Returns null when the first
+    // datagram is not a plaintext ClientHello fragment or the peer closes the transport.
+    private async Task<byte[]?> TryReassembleClientHelloAsync(
+        IDatagramTransport transport,
+        byte[] firstDatagram,
+        CancellationToken cancellationToken)
+    {
+        HandshakeReassembler reassembler = new(_options.MaxHandshakeMessageSize, firstSequence: 0);
+        if (!Dtls13HandshakeFlight.OfferPlaintext(firstDatagram, reassembler))
+        {
+            return null;
+        }
+
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(transport.MaxDatagramSize);
+        try
+        {
+            while (true)
+            {
+                if (reassembler.TryReadNext(
+                    out HandshakeType type, out byte[] body, out ushort sequence))
+                {
+                    if (type != HandshakeType.ClientHello)
+                    {
+                        return null;
+                    }
+
+                    byte[] message = HandshakeMessage.Serialize(type, sequence, body);
+                    return Dtls13PlaintextRecord.Encode(
+                        Dtls13PlaintextRecord.HandshakeContentType, 0, 0, message);
+                }
+
+                int received = await transport.ReceiveAsync(buffer, cancellationToken)
+                    .ConfigureAwait(false);
+                if (received == 0)
+                {
+                    return null;
+                }
+
+                Dtls13HandshakeFlight.OfferPlaintext(buffer.AsSpan(0, received), reassembler);
+            }
         }
         finally
         {

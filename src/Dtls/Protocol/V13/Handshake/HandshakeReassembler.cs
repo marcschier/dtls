@@ -21,9 +21,16 @@ internal sealed class HandshakeReassembler
     /// The largest reassembled message accepted (bounds memory; mirrors
     /// <c>DtlsOptions.MaxHandshakeMessageSize</c>).
     /// </param>
-    public HandshakeReassembler(int maxMessageLength)
+    /// <param name="firstSequence">
+    /// The <c>message_seq</c> of the first message expected by this reassembler. Messages are
+    /// delivered in order starting from this value; fragments with a lower sequence are ignored.
+    /// Defaults to 0 (the start of a handshake); set it to the first sequence of a mid-handshake
+    /// flight so a per-flight reassembler delivers that flight's messages.
+    /// </param>
+    public HandshakeReassembler(int maxMessageLength, ushort firstSequence = 0)
     {
         _maxMessageLength = maxMessageLength;
+        _nextSequence = firstSequence;
     }
 
     /// <summary>

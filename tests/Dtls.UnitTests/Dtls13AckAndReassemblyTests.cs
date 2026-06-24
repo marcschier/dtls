@@ -86,10 +86,70 @@ public sealed class Dtls13AckAndReassemblyTests
         AssertReassembles(shuffled, HandshakeType.Certificate, 0, originalBody);
     }
 
-    private static void AssertReassembles(
-        List<byte[]> fragments, HandshakeType expectedType, ushort expectedSeq, byte[] expectedBody)
+    [Fact]
+    public void Reassembler_WithNonZeroFirstSequence_DeliversThatSequence()
     {
-        HandshakeReassembler reassembler = new(maxMessageLength: 64 * 1024);
+        byte[] body = Enumerable.Range(0, 300).Select(i => (byte)(i % 91)).ToArray();
+        List<byte[]> fragments = HandshakeReassembler.Fragment(
+            HandshakeType.Certificate, messageSequence: 3, body, maxFragmentBodyLength: 64);
+
+        HandshakeReassembler reassembler = new(maxMessageLength: 64 * 1024, firstSequence: 3);
+        OfferAll(reassembler, fragments);
+
+        Assert.True(reassembler.TryReadNext(
+            out HandshakeType type, out byte[] reassembled, out ushort seq));
+        Assert.Equal(HandshakeType.Certificate, type);
+        Assert.Equal(3, seq);
+        Assert.Equal(body, reassembled);
+    }
+
+    [Fact]
+    public void Reassembler_WithNonZeroFirstSequence_DeliversMultiMessageFlightInOrder()
+    {
+        byte[] eeBody = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
+        byte[] certBody = Enumerable.Range(0, 400).Select(i => (byte)(i % 83)).ToArray();
+        byte[] finBody = Enumerable.Range(0, 32).Select(i => (byte)(i + 1)).ToArray();
+
+        // A mid-handshake flight EE(1), Certificate(2), Finished(3) fragmented to a small MTU.
+        List<byte[]> fragments = new();
+        fragments.AddRange(HandshakeReassembler.Fragment(
+            HandshakeType.EncryptedExtensions, 1, eeBody, 48));
+        fragments.AddRange(HandshakeReassembler.Fragment(
+            HandshakeType.Certificate, 2, certBody, 48));
+        fragments.AddRange(HandshakeReassembler.Fragment(
+            HandshakeType.Finished, 3, finBody, 48));
+
+        HandshakeReassembler reassembler = new(maxMessageLength: 64 * 1024, firstSequence: 1);
+        OfferAll(reassembler, fragments);
+
+        AssertNext(reassembler, HandshakeType.EncryptedExtensions, 1, eeBody);
+        AssertNext(reassembler, HandshakeType.Certificate, 2, certBody);
+        AssertNext(reassembler, HandshakeType.Finished, 3, finBody);
+        Assert.False(reassembler.TryReadNext(out _, out _, out _));
+    }
+
+    [Fact]
+    public void Reassembler_WithNonZeroFirstSequence_IgnoresEarlierSequences()
+    {
+        byte[] earlierBody = Enumerable.Range(0, 10).Select(i => (byte)i).ToArray();
+        byte[] flightBody = Enumerable.Range(0, 50).Select(i => (byte)(i % 71)).ToArray();
+
+        List<byte[]> fragments = new();
+        // A stray earlier message (seq 0) must be ignored by a flight reassembler starting at 1.
+        fragments.AddRange(HandshakeReassembler.Fragment(
+            HandshakeType.ServerHello, 0, earlierBody, 64));
+        fragments.AddRange(HandshakeReassembler.Fragment(
+            HandshakeType.EncryptedExtensions, 1, flightBody, 16));
+
+        HandshakeReassembler reassembler = new(maxMessageLength: 64 * 1024, firstSequence: 1);
+        OfferAll(reassembler, fragments);
+
+        AssertNext(reassembler, HandshakeType.EncryptedExtensions, 1, flightBody);
+        Assert.False(reassembler.TryReadNext(out _, out _, out _));
+    }
+
+    private static void OfferAll(HandshakeReassembler reassembler, List<byte[]> fragments)
+    {
         foreach (byte[] fragment in fragments)
         {
             Assert.True(
@@ -97,6 +157,26 @@ public sealed class Dtls13AckAndReassemblyTests
             reassembler.Offer(
                 header, fragment.AsSpan(HandshakeMessage.HeaderLength, header.FragmentLength));
         }
+    }
+
+    private static void AssertNext(
+        HandshakeReassembler reassembler,
+        HandshakeType expectedType,
+        ushort expectedSeq,
+        byte[] expectedBody)
+    {
+        Assert.True(reassembler.TryReadNext(
+            out HandshakeType type, out byte[] body, out ushort seq));
+        Assert.Equal(expectedType, type);
+        Assert.Equal(expectedSeq, seq);
+        Assert.Equal(expectedBody, body);
+    }
+
+    private static void AssertReassembles(
+        List<byte[]> fragments, HandshakeType expectedType, ushort expectedSeq, byte[] expectedBody)
+    {
+        HandshakeReassembler reassembler = new(maxMessageLength: 64 * 1024, expectedSeq);
+        OfferAll(reassembler, fragments);
 
         Assert.True(reassembler.TryReadNext(
             out HandshakeType type, out byte[] body, out ushort seq));
