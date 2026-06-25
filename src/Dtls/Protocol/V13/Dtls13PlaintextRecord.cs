@@ -85,8 +85,7 @@ internal static class Dtls13PlaintextRecord
 
         SpanReader reader = new(source);
         if (!reader.TryReadByte(out contentType)
-            || !reader.TryReadUInt16(out ushort version)
-            || version != DtlsWireVersion.Dtls12
+            || !reader.TryReadUInt16(out _) // legacy_record_version: advisory, ignored on receive
             || !reader.TryReadUInt16(out epoch)
             || !reader.TryReadUInt48(out sequenceNumber)
             || !reader.TryReadUInt16(out ushort length)
