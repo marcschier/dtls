@@ -1,6 +1,6 @@
 name: nuget
 
-# Manually publishes the most recently published Dtls package from the repository's GitHub
+# Manually publishes the most recently published DtlsSharp package from the repository's GitHub
 # Packages feed to nuget.org using NuGet trusted publishing (OIDC short-lived token — no stored
 # API key). Run from the Actions tab once a version has been published to GitHub Packages by the
 # tag-triggered CI job.
@@ -26,7 +26,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Download latest Dtls package from GitHub Packages
+      - name: Download latest DtlsSharp package from GitHub Packages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
