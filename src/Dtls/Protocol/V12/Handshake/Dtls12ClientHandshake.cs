@@ -46,6 +46,7 @@ internal static class Dtls12ClientHandshake
         CancellationToken cancellationToken)
     {
         bool usePsk = options.PskCallback is not null;
+        bool offerRawPublicKey = !usePsk && options.AllowRawPublicKeys;
         IReadOnlyList<ushort> offeredSuites = usePsk
             ? Dtls12CipherSuite.DefaultIdsFor(certificate: false, ecdhePsk: true, plainPsk: true)
             : Dtls12CipherSuite.DefaultIdsFor(certificate: true, ecdhePsk: false, plainPsk: false);
@@ -57,7 +58,8 @@ internal static class Dtls12ClientHandshake
             transport, options.HandshakeRetransmissionTimeout, options.MaxHandshakeRetransmissions);
 
         // Flight 1: cookieless ClientHello (message_seq 0).
-        byte[] helloNoCookie = BuildClientHello(clientRandom, Array.Empty<byte>(), offeredSuites);
+        byte[] helloNoCookie = BuildClientHello(
+            clientRandom, Array.Empty<byte>(), offeredSuites, offerRawPublicKey);
         ulong recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
                 transceiver,
                 new[] { new OutboundHandshakeMessage(HandshakeType.ClientHello, 0, helloNoCookie) },
@@ -83,7 +85,8 @@ internal static class Dtls12ClientHandshake
         }
 
         // Flight 3: ClientHello with the cookie (message_seq 1) — the transcript starts here.
-        byte[] helloWithCookie = BuildClientHello(clientRandom, cookie, offeredSuites);
+        byte[] helloWithCookie = BuildClientHello(
+            clientRandom, cookie, offeredSuites, offerRawPublicKey);
         var transcript = new PendingTranscript();
         transcript.Defer(HandshakeType.ClientHello, 1, helloWithCookie);
         recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
@@ -170,6 +173,7 @@ internal static class Dtls12ClientHandshake
                 suite,
                 serverHello.Random,
                 clientRandom,
+                NegotiateServerCertificateType(serverHello, options),
                 pending,
                 transcript,
                 serverFlight,
@@ -184,6 +188,7 @@ internal static class Dtls12ClientHandshake
         Dtls12CipherSuite suite,
         byte[] serverRandom,
         byte[] clientRandom,
+        CertificateType serverCertificateType,
         PendingTranscript pending,
         Dtls12Transcript transcript,
         IReadOnlyList<Dtls13HandshakeRecords.Message> serverFlight,
@@ -191,10 +196,33 @@ internal static class Dtls12ClientHandshake
         CancellationToken cancellationToken)
     {
         ServerFlightParts parts = ParseServerFlight(serverFlight, suite);
+        byte[] signedContent = BuildSkeSignedContent(clientRandom, serverRandom, parts);
 
-        using X509Certificate2 serverCertificate = LoadCertificate(parts.ServerCertificate);
-        VerifyServerKeyExchange(serverCertificate, clientRandom, serverRandom, parts);
-        ValidateServerCertificate(options, serverCertificate);
+        if (serverCertificateType == CertificateType.RawPublicKey)
+        {
+            using AsymmetricAlgorithm publicKey = RawPublicKey.ImportSubjectPublicKeyInfo(
+                parts.ServerCertificate);
+            if (!Dtls12Signer.Verify(
+                publicKey, parts.SignatureAlgorithm, signedContent, parts.Signature))
+            {
+                throw new DtlsException(
+                    "The server ServerKeyExchange signature did not verify.");
+            }
+
+            ValidateRawPublicKey(options, parts.ServerCertificate);
+        }
+        else
+        {
+            using X509Certificate2 serverCertificate = LoadCertificate(parts.ServerCertificate);
+            if (!Dtls12Signer.Verify(
+                serverCertificate, parts.SignatureAlgorithm, signedContent, parts.Signature))
+            {
+                throw new DtlsException(
+                    "The server ServerKeyExchange signature did not verify.");
+            }
+
+            ValidateServerCertificate(options, serverCertificate);
+        }
 
         using EcdheKeyExchange ecdhe = EcdheKeyExchange.Create((NamedGroup)parts.NamedCurve);
         byte[] clientPoint = ecdhe.ExportKeyShare();
@@ -532,8 +560,7 @@ internal static class Dtls12ClientHandshake
         return false;
     }
 
-    private static void VerifyServerKeyExchange(
-        X509Certificate2 serverCertificate,
+    private static byte[] BuildSkeSignedContent(
         byte[] clientRandom,
         byte[] serverRandom,
         ServerFlightParts parts)
@@ -543,11 +570,52 @@ internal static class Dtls12ClientHandshake
         clientRandom.CopyTo(signed, 0);
         serverRandom.CopyTo(signed, clientRandom.Length);
         parts.EcdhParams.CopyTo(signed, clientRandom.Length + serverRandom.Length);
+        return signed;
+    }
 
-        if (!Dtls12Signer.Verify(
-            serverCertificate, parts.SignatureAlgorithm, signed, parts.Signature))
+    private static CertificateType NegotiateServerCertificateType(
+        Dtls12ServerHello serverHello,
+        DtlsClientOptions options)
+    {
+        if (!ExtensionList.TryFind(
+            serverHello.Extensions,
+            ExtensionType.ServerCertificateType,
+            out HandshakeExtension ext))
         {
-            throw new DtlsException("The server ServerKeyExchange signature did not verify.");
+            return CertificateType.X509;
+        }
+
+        if (!ServerCertificateTypeExtension.TryParseServerHello(
+            ext.Data, out CertificateType selected))
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.DecodeError,
+                true,
+                "The server server_certificate_type extension was malformed.");
+        }
+
+        if (selected == CertificateType.RawPublicKey && !options.AllowRawPublicKeys)
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.UnsupportedExtension,
+                true,
+                "The server selected raw public keys, which were not offered.");
+        }
+
+        return selected;
+    }
+
+    private static void ValidateRawPublicKey(
+        DtlsClientOptions options,
+        byte[] subjectPublicKeyInfo)
+    {
+        if (options.RawPublicKeyValidation is null
+            || !options.RawPublicKeyValidation(subjectPublicKeyInfo))
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.BadCertificate,
+                true,
+                "The server raw public key was rejected by RawPublicKeyValidation.");
         }
     }
 
@@ -586,7 +654,8 @@ internal static class Dtls12ClientHandshake
     private static byte[] BuildClientHello(
         byte[] clientRandom,
         byte[] cookie,
-        IReadOnlyList<ushort> suites)
+        IReadOnlyList<ushort> suites,
+        bool offerRawPublicKey)
     {
         List<HandshakeExtension> extensions = new()
         {
@@ -601,6 +670,14 @@ internal static class Dtls12ClientHandshake
                 ExtensionType.ExtendedMasterSecret,
                 Dtls12Extensions.EncodeExtendedMasterSecret()),
         };
+
+        if (offerRawPublicKey)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ServerCertificateType,
+                ServerCertificateTypeExtension.EncodeClientHello(
+                    new[] { CertificateType.RawPublicKey, CertificateType.X509 })));
+        }
 
         ushort[] suiteArray = new ushort[suites.Count];
         for (int i = 0; i < suites.Count; i++)

@@ -107,6 +107,10 @@ internal static class Dtls12ServerHandshake
         byte[] serverRandom = new byte[Dtls12ClientHello.RandomLength];
         RandomNumberGenerator.Fill(serverRandom);
 
+        bool useRawPublicKey = suite.UsesCertificate
+            && options.AllowRawPublicKeys
+            && ClientOffersRawPublicKey(clientHello);
+
         Dtls12Transcript transcript = new(suite.PrfHash);
         transcript.Append(HandshakeType.ClientHello, 1, clientHelloBody);
 
@@ -114,7 +118,7 @@ internal static class Dtls12ServerHandshake
         List<OutboundHandshakeMessage> flight = new();
         ushort seq = 1;
 
-        byte[] serverHelloBody = BuildServerHello(serverRandom, suite.Id);
+        byte[] serverHelloBody = BuildServerHello(serverRandom, suite.Id, useRawPublicKey);
         flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHello, seq, serverHelloBody));
         transcript.Append(HandshakeType.ServerHello, seq, serverHelloBody);
         seq++;
@@ -125,7 +129,8 @@ internal static class Dtls12ServerHandshake
             if (suite.UsesCertificate)
             {
                 ecdhe = BuildCertificateFlight(
-                    flight, transcript, ref seq, options, clientHello, serverRandom, suite);
+                    flight, transcript, ref seq, options, clientHello, serverRandom,
+                    useRawPublicKey);
             }
             else if (suite.KeyExchange == Dtls12KeyExchange.EcdhePsk)
             {
@@ -188,9 +193,8 @@ internal static class Dtls12ServerHandshake
         DtlsServerOptions options,
         Dtls12ClientHello clientHello,
         byte[] serverRandom,
-        Dtls12CipherSuite suite)
+        bool useRawPublicKey)
     {
-        _ = suite;
         X509Certificate2 serverCertificate = options.ServerCertificate!;
         NamedGroup group = SelectGroup(clientHello);
 
@@ -211,7 +215,11 @@ internal static class Dtls12ServerHandshake
         byte[] signature = Dtls12Signer.Sign(serverCertificate, signatureAlgorithm, signedContent);
         CryptographicOperations.ZeroMemory(signedContent);
 
-        byte[] certificateBody = Dtls12Certificate.Encode(new[] { serverCertificate.RawData });
+        // For raw public keys (RFC 7250) the Certificate carries a single SubjectPublicKeyInfo.
+        byte[] certificateEntry = useRawPublicKey
+            ? RawPublicKey.ExportSubjectPublicKeyInfo(serverCertificate)
+            : serverCertificate.RawData;
+        byte[] certificateBody = Dtls12Certificate.Encode(new[] { certificateEntry });
         flight.Add(new OutboundHandshakeMessage(HandshakeType.Certificate, seq, certificateBody));
         transcript.Append(HandshakeType.Certificate, seq, certificateBody);
         seq++;
@@ -686,7 +694,10 @@ internal static class Dtls12ServerHandshake
         throw new DtlsException("No mutually supported named group for ECDHE.");
     }
 
-    private static byte[] BuildServerHello(byte[] serverRandom, ushort cipherSuite)
+    private static byte[] BuildServerHello(
+        byte[] serverRandom,
+        ushort cipherSuite,
+        bool useRawPublicKey)
     {
         List<HandshakeExtension> extensions = new()
         {
@@ -697,6 +708,13 @@ internal static class Dtls12ServerHandshake
                 ExtensionType.EcPointFormats, Dtls12Extensions.EncodeEcPointFormats()),
         };
 
+        if (useRawPublicKey)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ServerCertificateType,
+                ServerCertificateTypeExtension.EncodeServerHello(CertificateType.RawPublicKey)));
+        }
+
         Dtls12ServerHello hello = new()
         {
             Random = serverRandom,
@@ -704,6 +722,29 @@ internal static class Dtls12ServerHandshake
             Extensions = extensions,
         };
         return hello.Encode();
+    }
+
+    private static bool ClientOffersRawPublicKey(Dtls12ClientHello clientHello)
+    {
+        if (!ExtensionList.TryFind(
+            clientHello.Extensions,
+            ExtensionType.ServerCertificateType,
+            out HandshakeExtension ext)
+            || !ServerCertificateTypeExtension.TryParseClientHello(
+                ext.Data, out List<CertificateType> types))
+        {
+            return false;
+        }
+
+        foreach (CertificateType type in types)
+        {
+            if (type == CertificateType.RawPublicKey)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static byte[] Concat(byte[] a, byte[] b, byte[] c)
