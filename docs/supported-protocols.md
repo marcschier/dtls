@@ -117,4 +117,11 @@ The managed DTLS 1.3 engine supports post-handshake key update (RFC 8446 section
 
 DTLS 1.0 and DTLS 1.2 are validated in CI against OpenSSL `s_server` and `s_client`.
 
+The managed DTLS 1.2 engine is validated against the native OpenSSL DTLS 1.2 backend in CI, in both
+directions (managed client to OpenSSL server, and OpenSSL client to managed server) and for both
+certificate and PSK authentication. This cross-implementation testing exercises the real `libssl`
+wire format, including the HelloVerifyRequest-less server flow, the extended_master_secret and
+renegotiation_info (RFC 5746) extensions, and the advisory record-layer legacy_version that DTLS
+receivers ignore (RFC 6347 / RFC 9147).
+
 DTLS 1.3 does not have mainstream native OpenSSL interop coverage because OpenSSL lacks DTLS 1.3 support, so correctness is validated through RFC 9147 vectors, self-interop, and optional wolfSSL interoperability testing.
