@@ -12,7 +12,9 @@ Dtls supports DTLS 1.0, DTLS 1.2, and DTLS 1.3 across Linux, Windows, and macOS 
 
 OpenSSL, Schannel, and Apple Secure Transport / Network.framework do not currently provide a mainstream native DTLS 1.3 stack, so DTLS 1.3 is implemented in managed code and uses BCL cryptographic primitives backed by the operating system crypto provider.
 
-For DTLS 1.2, the native operating-system stack is preferred on Linux, Windows, and macOS. On platforms where no native DTLS backend is available (for example Android), a fully managed DTLS 1.2 engine — implemented in C# on the same BCL primitives as the DTLS 1.3 engine — is used as the universal fallback. The public `DtlsClient`/`DtlsServer` API selects the managed DTLS 1.2 engine automatically when `NativeDtlsBackend.ForCurrentPlatform()` returns no backend.
+For DTLS 1.2, the native operating-system stack is preferred on Linux, Windows, and macOS. On platforms where no native DTLS backend is available (for example Android and iOS), a fully managed DTLS 1.2 engine — implemented in C# on the same BCL primitives as the DTLS 1.3 engine — is used as the universal fallback. The public `DtlsClient`/`DtlsServer` API selects the managed DTLS 1.2 engine automatically when `NativeDtlsBackend.ForCurrentPlatform()` returns no backend.
+
+The library targets `netstandard2.1`, `net8.0`, `net9.0`, and `net10.0`, and additionally builds the mobile target frameworks `net10.0-android` and `net10.0-ios` (validated build-only in CI). On iOS the BCL AES-CCM primitive is unavailable, so the AES-CCM cipher suites are compiled out there (AES-GCM remains the default AEAD); Android retains the full suite set. Both mobile platforms run DTLS through the managed DTLS 1.2 engine and the managed DTLS 1.3 engine.
 
 ### Version negotiation and DTLS 1.2 downgrade
 
