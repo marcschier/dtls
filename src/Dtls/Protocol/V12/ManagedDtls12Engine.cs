@@ -1,38 +1,35 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Dtls.Protocol.V13.Handshake;
+using Dtls.Protocol.V12.Handshake;
 using Dtls.Transport;
 
-namespace Dtls.Protocol.V13;
+namespace Dtls.Protocol.V12;
 
 /// <summary>
-/// The managed DTLS 1.3 (RFC 9147) engine. It drives the handshake state machine and
-/// record protection in managed code, using BCL cryptographic primitives (which delegate
-/// to the host OS crypto). The current scope is the external-PSK + ECDHE (psk_dhe_ke)
-/// handshake; other authentication modes and robustness features are deferred.
+/// The managed DTLS 1.2 (RFC 6347 / RFC 5246) engine. It drives the certificate- and PSK-
+/// authenticated handshake state machine and record protection in managed code using BCL
+/// cryptographic primitives (which delegate to the host OS crypto). It is the universal fallback
+/// used where no native OS DTLS backend is available (for example Android).
 /// </summary>
-internal sealed class ManagedDtls13Engine
+internal sealed class ManagedDtls12Engine
 {
     public static async Task<DtlsConnection> ConnectAsync(
         IDatagramTransport transport,
         DtlsClientOptions options,
-        CancellationToken cancellationToken,
-        bool allowDtls12Fallback = false)
+        CancellationToken cancellationToken)
     {
         using CancellationTokenSource timeout = CreateTimeoutSource(
             options.HandshakeTimeout, cancellationToken);
         try
         {
-            // When the version range permits it, the certificate client offers both DTLS 1.3 and
-            // 1.2 and finishes on the managed DTLS 1.2 engine internally if the peer selects 1.2.
-            return await Dtls13ClientHandshake
-                .RunAsync(transport, options, timeout.Token, allowDtls12Fallback)
+            return await Dtls12ClientHandshake
+                .RunAsync(transport, options, timeout.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new DtlsException("The DTLS client handshake timed out.");
+            throw new DtlsException("The DTLS 1.2 client handshake timed out.");
         }
     }
 
@@ -46,13 +43,13 @@ internal sealed class ManagedDtls13Engine
             options.HandshakeTimeout, cancellationToken);
         try
         {
-            return await Dtls13ServerHandshake
+            return await Dtls12ServerHandshake
                 .RunAsync(transport, options, initialDatagram, timeout.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new DtlsException("The DTLS 1.3 server handshake timed out.");
+            throw new DtlsException("The DTLS 1.2 server handshake timed out.");
         }
     }
 

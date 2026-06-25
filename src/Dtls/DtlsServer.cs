@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Threading;
 using System.Threading.Tasks;
 using Dtls.Interop;
+using Dtls.Protocol.V12;
 using Dtls.Protocol.V13;
 using Dtls.Protocol.V13.Handshake;
 using Dtls.Routing;
@@ -147,9 +148,15 @@ public sealed class DtlsServer
         ReadOnlyMemory<byte> initialDatagram,
         CancellationToken cancellationToken)
     {
-        INativeDtlsBackend backend = NativeDtlsBackend.ForCurrentPlatform()
-            ?? throw new PlatformNotSupportedException(
-                "No native DTLS 1.0/1.2 backend is available for this operating system.");
-        return backend.AcceptAsync(transport, _options, initialDatagram, cancellationToken);
+        // Prefer the native OS backend; where none exists (for example Android) the managed
+        // DTLS 1.2 engine is the universal fallback.
+        INativeDtlsBackend? backend = NativeDtlsBackend.ForCurrentPlatform();
+        if (backend is not null)
+        {
+            return backend.AcceptAsync(transport, _options, initialDatagram, cancellationToken);
+        }
+
+        return ManagedDtls12Engine.AcceptAsync(
+            transport, _options, initialDatagram, cancellationToken);
     }
 }

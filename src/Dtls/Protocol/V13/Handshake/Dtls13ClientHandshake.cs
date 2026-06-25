@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dtls.Crypto;
 using Dtls.Internal;
+using Dtls.Protocol.V12.Handshake;
 using Dtls.Transport;
 
 namespace Dtls.Protocol.V13.Handshake;
@@ -49,14 +50,16 @@ internal static class Dtls13ClientHandshake
     public static Task<DtlsConnection> RunAsync(
         IDatagramTransport transport,
         DtlsClientOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowDtls12Fallback = false)
     {
         if (options.PskCallback is not null)
         {
             return RunPskAsync(transport, options, cancellationToken);
         }
 
-        return RunCertificateAsync(transport, options, cancellationToken);
+        return RunCertificateAsync(
+            transport, options, allowDtls12Fallback, cancellationToken);
     }
 
     private static async Task<DtlsConnection> RunPskAsync(
@@ -216,6 +219,7 @@ internal static class Dtls13ClientHandshake
     private static async Task<DtlsConnection> RunCertificateAsync(
         IDatagramTransport transport,
         DtlsClientOptions options,
+        bool allowDtls12Fallback,
         CancellationToken cancellationToken)
     {
         // Certificate mode supports hash agility: the full configured suite list (mixed
@@ -237,17 +241,38 @@ internal static class Dtls13ClientHandshake
             byte[] clientConnectionId = NewConnectionId(options);
             byte[] clientHello1Body = BuildCertificateClientHelloBody(
                 random, group, keyShare, offeredIds, options.AllowRawPublicKeys,
-                clientConnectionId, cookie: null);
+                clientConnectionId, cookie: null, offerDtls12: allowDtls12Fallback);
 
             await Dtls13HandshakeFlight.SendPlaintextAsync(
                     transceiver, HandshakeType.ClientHello, 0, clientHello1Body, 0,
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            (ServerHello serverHello, byte[] serverHelloBody) =
-                await ReceiveServerHelloAsync(
+            // When both versions were offered, the first response is received through a
+            // fallback-aware path; if the peer chose DTLS 1.2 it returns a fallback state and the
+            // handshake is finished on the managed DTLS 1.2 engine.
+            ServerHello serverHello;
+            byte[] serverHelloBody;
+            if (allowDtls12Fallback)
+            {
+                (serverHello, serverHelloBody, Dtls12FallbackState? fallback) =
+                    await ReceiveFirstResponseWithFallbackAsync(
+                            transceiver, clientHello1Body, random, options.MaxHandshakeMessageSize,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                if (fallback is not null)
+                {
+                    return await Dtls12ClientHandshake
+                        .ContinueFromFallbackAsync(fallback, options, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                (serverHello, serverHelloBody) = await ReceiveServerHelloAsync(
                         transceiver, 0, options.MaxHandshakeMessageSize, cancellationToken)
                     .ConfigureAwait(false);
+            }
 
             byte[]? transcriptPrefix = null;
             byte[] clientHelloBody = clientHello1Body;
@@ -279,7 +304,7 @@ internal static class Dtls13ClientHandshake
 
                 clientHelloBody = BuildCertificateClientHelloBody(
                     random, group, keyShare, offeredIds, options.AllowRawPublicKeys,
-                    clientConnectionId, cookie);
+                    clientConnectionId, cookie, offerDtls12: false);
                 await Dtls13HandshakeFlight.SendPlaintextAsync(
                         transceiver, HandshakeType.ClientHello, 1, clientHelloBody, 1,
                         cancellationToken)
@@ -588,6 +613,77 @@ internal static class Dtls13ClientHandshake
         }
 
         return (serverHello, body);
+    }
+
+    // Receives the first server response when both DTLS 1.3 and 1.2 were offered. Returns the
+    // parsed ServerHello (and a null fallback) when the server selected DTLS 1.3; returns a
+    // Dtls12FallbackState (carrying the live transceiver state) when the server selected DTLS 1.2 —
+    // either via a HelloVerifyRequest or by replying with its DTLS 1.2 hello flight directly.
+    private static async Task<(ServerHello Hello, byte[] Body, Dtls12FallbackState? Fallback)>
+        ReceiveFirstResponseWithFallbackAsync(
+            Dtls13FlightTransceiver transceiver,
+            byte[] clientHelloBody,
+            byte[] random,
+            int maxHandshakeMessageSize,
+            CancellationToken cancellationToken)
+    {
+        HandshakeReassembler reassembler = new(maxHandshakeMessageSize, firstSequence: 0);
+        List<Dtls13HandshakeRecords.Message> drained = new();
+        bool collecting12 = false;
+        while (true)
+        {
+            byte[] datagram = await transceiver.ReceiveFlightAsync(cancellationToken)
+                .ConfigureAwait(false);
+            bool offered = Dtls13HandshakeFlight.OfferPlaintext(datagram, reassembler);
+
+            while (reassembler.TryReadNext(
+                out HandshakeType type, out byte[] body, out ushort sequence))
+            {
+                drained.Add(new Dtls13HandshakeRecords.Message(type, body, sequence));
+
+                if (!collecting12)
+                {
+                    if (type == HandshakeType.HelloVerifyRequest)
+                    {
+                        if (!Dtls12HelloVerifyRequest.TryParse(body, out byte[] cookie))
+                        {
+                            throw new DtlsException("Malformed HelloVerifyRequest.");
+                        }
+
+                        return (new ServerHello(), Array.Empty<byte>(), new Dtls12FallbackState(
+                            transceiver, clientHelloBody, random, 1, cookie, null));
+                    }
+
+                    if (type != HandshakeType.ServerHello)
+                    {
+                        throw new DtlsException(
+                            "Expected a ServerHello or HelloVerifyRequest.");
+                    }
+
+                    if (ServerHello.TryParse(body, out ServerHello serverHello)
+                        && ExtensionList.TryFind(
+                            serverHello.Extensions, ExtensionType.SupportedVersions, out _))
+                    {
+                        return (serverHello, body, null); // The server selected DTLS 1.3.
+                    }
+
+                    collecting12 = true; // The server selected DTLS 1.2; collect its flight.
+                }
+
+                if (collecting12 && type == HandshakeType.ServerHelloDone)
+                {
+                    return (new ServerHello(), Array.Empty<byte>(), new Dtls12FallbackState(
+                        transceiver, clientHelloBody, random, 1, null, drained));
+                }
+            }
+
+            if (!offered && !collecting12)
+            {
+                // A datagram with no plaintext handshake fragment (an early protected flight over a
+                // lossy transport): forget it so a later receive can consume it.
+                transceiver.Forget(datagram);
+            }
+        }
     }
 
     private static Dtls13CipherSuite ResolveServerSuite(
@@ -968,14 +1064,18 @@ internal static class Dtls13ClientHandshake
         ushort[] offeredIds,
         bool offerRawPublicKey,
         byte[] connectionId,
-        byte[]? cookie)
+        byte[]? cookie,
+        bool offerDtls12)
     {
+        ushort[] supportedVersions = offerDtls12
+            ? new ushort[] { DtlsWireVersion.Dtls13, DtlsWireVersion.Dtls12 }
+            : new ushort[] { DtlsWireVersion.Dtls13 };
+
         List<HandshakeExtension> extensions = new()
         {
             new HandshakeExtension(
                 ExtensionType.SupportedVersions,
-                SupportedVersionsExtension.EncodeClientHello(
-                    new ushort[] { DtlsWireVersion.Dtls13 })),
+                SupportedVersionsExtension.EncodeClientHello(supportedVersions)),
             new HandshakeExtension(
                 ExtensionType.SupportedGroups,
                 SupportedGroupsExtension.Encode(CertificateOfferedGroups)),
@@ -987,6 +1087,29 @@ internal static class Dtls13ClientHandshake
                 ExtensionType.SignatureAlgorithms,
                 SignatureAlgorithmsExtension.Encode(OfferedSignatureSchemes)),
         };
+
+        ushort[] cipherSuites = offeredIds;
+        if (offerDtls12)
+        {
+            // Add the DTLS 1.2 certificate cipher suites and the DTLS 1.2 ClientHello extensions so
+            // a DTLS 1.2-only peer can complete the handshake; a DTLS 1.3 peer ignores them.
+            IReadOnlyList<ushort> dtls12Ids = Dtls12CipherSuite.DefaultIdsFor(
+                certificate: true, ecdhePsk: false, plainPsk: false);
+            cipherSuites = new ushort[offeredIds.Length + dtls12Ids.Count];
+            offeredIds.CopyTo(cipherSuites, 0);
+            for (int i = 0; i < dtls12Ids.Count; i++)
+            {
+                cipherSuites[offeredIds.Length + i] = dtls12Ids[i];
+            }
+
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.EcPointFormats, Dtls12Extensions.EncodeEcPointFormats()));
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ExtendedMasterSecret,
+                Dtls12Extensions.EncodeExtendedMasterSecret()));
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.RenegotiationInfo, Dtls12Extensions.EncodeRenegotiationInfo()));
+        }
 
         if (offerRawPublicKey)
         {
@@ -1011,7 +1134,7 @@ internal static class Dtls13ClientHandshake
         ClientHello clientHello = new()
         {
             Random = random,
-            CipherSuites = offeredIds,
+            CipherSuites = cipherSuites,
             Extensions = extensions,
         };
         return clientHello.Encode();

@@ -11,8 +11,9 @@ namespace Dtls.Interop;
 internal static class NativeDtlsBackend
 {
     /// <summary>
-    /// Returns the native backend for the current platform, or <see langword="null"/> if
-    /// no native DTLS stack is integrated for this operating system.
+    /// Returns the native backend for the current platform, or <see langword="null"/> if no native
+    /// DTLS stack is integrated for this operating system. On iOS and Android no native backend is
+    /// used, so the managed DTLS 1.2 engine serves as the universal fallback there.
     /// </summary>
     public static INativeDtlsBackend? ForCurrentPlatform()
     {
@@ -34,3 +35,5 @@ internal static class NativeDtlsBackend
         return null;
     }
 }
+
+

@@ -9,8 +9,14 @@ internal enum ExtensionType : ushort
     /// <summary>supported_groups (10).</summary>
     SupportedGroups = 10,
 
+    /// <summary>ec_point_formats (11, RFC 4492 / RFC 8422; DTLS 1.2).</summary>
+    EcPointFormats = 11,
+
     /// <summary>signature_algorithms (13).</summary>
     SignatureAlgorithms = 13,
+
+    /// <summary>extended_master_secret (23, RFC 7627; DTLS 1.2).</summary>
+    ExtendedMasterSecret = 23,
 
     /// <summary>client_certificate_type (19, RFC 7250).</summary>
     ClientCertificateType = 19,
@@ -35,4 +41,7 @@ internal enum ExtensionType : ushort
 
     /// <summary>connection_id (54, RFC 9146).</summary>
     ConnectionId = 54,
+
+    /// <summary>renegotiation_info (0xFF01, RFC 5746; DTLS 1.2 secure renegotiation).</summary>
+    RenegotiationInfo = 0xFF01,
 }

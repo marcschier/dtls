@@ -1,0 +1,816 @@
+using System;
+using System.Collections.Generic;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading;
+using System.Threading.Tasks;
+using Dtls.Crypto;
+using Dtls.Protocol.V13;
+using Dtls.Protocol.V13.Handshake;
+using Dtls.Transport;
+
+namespace Dtls.Protocol.V12.Handshake;
+
+/// <summary>
+/// The managed DTLS 1.2 server handshake driver (RFC 6347 / RFC 5246) for the certificate-
+/// authenticated ECDHE suites (RFC 5289). It performs a stateless HelloVerifyRequest cookie
+/// exchange, sends its hello flight (ServerHello / Certificate / signed ServerKeyExchange /
+/// optional CertificateRequest / ServerHelloDone), receives the client's ClientKeyExchange (and
+/// optional Certificate / CertificateVerify), ChangeCipherSpec and Finished, then replies with its
+/// own ChangeCipherSpec and Finished. The extended_master_secret extension (RFC 7627) is required.
+/// </summary>
+internal static class Dtls12ServerHandshake
+{
+    private static readonly byte[] CookieSecret = CreateCookieSecret();
+
+    public static async Task<DtlsConnection> RunAsync(
+        IDatagramTransport transport,
+        DtlsServerOptions options,
+        ReadOnlyMemory<byte> initialDatagram,
+        CancellationToken cancellationToken)
+    {
+        if (options.ServerCertificate is null && options.PskCallback is null)
+        {
+            throw new DtlsException(
+                "The managed DTLS 1.2 server requires a ServerCertificate or a PskCallback.");
+        }
+
+        if (!Dtls13HandshakeRecords.TryReadPlaintextHandshake(
+                initialDatagram.Span, out HandshakeType type, out byte[] helloBody)
+            || type != HandshakeType.ClientHello
+            || !Dtls12ClientHello.TryParse(helloBody, out Dtls12ClientHello clientHello))
+        {
+            throw new DtlsException("The initial datagram was not a valid DTLS 1.2 ClientHello.");
+        }
+
+        Dtls13FlightTransceiver transceiver = new(
+            transport, options.HandshakeRetransmissionTimeout, options.MaxHandshakeRetransmissions);
+        transceiver.Seed(initialDatagram.Span);
+
+        // Flight: HelloVerifyRequest with the stateless cookie (message_seq 0).
+        byte[] cookie = Dtls12Cookie.Build(CookieSecret, clientHello.Random);
+        byte[] verifyBody = Dtls12HelloVerifyRequest.Encode(cookie);
+        ulong recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
+                transceiver,
+                new[]
+                {
+                    new OutboundHandshakeMessage(HandshakeType.HelloVerifyRequest, 0, verifyBody),
+                },
+                0,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // Receive the second ClientHello (message_seq 1) carrying the cookie.
+        HandshakeReassembler helloReassembler =
+            new(options.MaxHandshakeMessageSize, firstSequence: 1);
+        List<Dtls13HandshakeRecords.Message> helloFlight =
+            await Dtls12Flight.ReceivePlaintextFlightAsync(
+                    transceiver, helloReassembler, HandshakeType.ClientHello, cancellationToken)
+                .ConfigureAwait(false);
+        if (helloFlight.Count != 1
+            || !Dtls12ClientHello.TryParse(helloFlight[0].Body, out clientHello))
+        {
+            throw new DtlsException("Expected a cookie ClientHello from the client.");
+        }
+
+        if (!Dtls12Cookie.Verify(CookieSecret, clientHello.Random, clientHello.Cookie))
+        {
+            throw new DtlsException("The ClientHello cookie did not verify.");
+        }
+
+        return await CompleteAsync(
+                transceiver,
+                options,
+                clientHello,
+                helloFlight[0].Body,
+                recordSequence,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<DtlsConnection> CompleteAsync(
+        Dtls13FlightTransceiver transceiver,
+        DtlsServerOptions options,
+        Dtls12ClientHello clientHello,
+        byte[] clientHelloBody,
+        ulong recordSequence,
+        CancellationToken cancellationToken)
+    {
+        Dtls12CipherSuite suite = SelectCipherSuite(clientHello, options);
+
+        bool useExtendedMasterSecret = Dtls12Extensions.Has(
+            clientHello.Extensions, ExtensionType.ExtendedMasterSecret);
+
+        byte[] serverRandom = new byte[Dtls12ClientHello.RandomLength];
+        RandomNumberGenerator.Fill(serverRandom);
+
+        bool useRawPublicKey = suite.UsesCertificate
+            && options.AllowRawPublicKeys
+            && ClientOffersRawPublicKey(clientHello);
+
+        bool clientOfferedEcPointFormats = Dtls12Extensions.Has(
+            clientHello.Extensions, ExtensionType.EcPointFormats);
+
+        bool clientSignaledRenegotiationInfo =
+            Dtls12Extensions.Has(clientHello.Extensions, ExtensionType.RenegotiationInfo)
+            || ClientHasScsv(clientHello);
+
+        Dtls12Transcript transcript = new(suite.PrfHash);
+        transcript.Append(HandshakeType.ClientHello, 1, clientHelloBody);
+
+        // Server hello flight (message_seq 1..N).
+        List<OutboundHandshakeMessage> flight = new();
+        ushort seq = 1;
+
+        byte[] serverHelloBody = BuildServerHello(
+            serverRandom, suite.Id, useRawPublicKey, useExtendedMasterSecret,
+            clientOfferedEcPointFormats, clientSignaledRenegotiationInfo);
+        flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHello, seq, serverHelloBody));
+        transcript.Append(HandshakeType.ServerHello, seq, serverHelloBody);
+        seq++;
+
+        EcdheKeyExchange? ecdhe = null;
+        try
+        {
+            if (suite.UsesCertificate)
+            {
+                ecdhe = BuildCertificateFlight(
+                    flight, transcript, ref seq, options, clientHello, serverRandom,
+                    useRawPublicKey);
+            }
+            else if (suite.KeyExchange == Dtls12KeyExchange.EcdhePsk)
+            {
+                ecdhe = BuildEcdhePskFlight(
+                    flight, transcript, ref seq, clientHello);
+            }
+
+            // Plain PSK sends no ServerKeyExchange (no identity hint, no ECDHE params).
+            bool requestClientCertificate = suite.UsesCertificate
+                && options.RequireClientCertificate;
+            if (requestClientCertificate)
+            {
+                byte[] requestBody = Dtls12CertificateRequest.Encode(
+                    new byte[]
+                    {
+                        Dtls12CertificateRequest.EcdsaSign,
+                        Dtls12CertificateRequest.RsaSign,
+                    },
+                    new ushort[] { 0x0403, 0x0503, 0x0401, 0x0501 });
+                flight.Add(new OutboundHandshakeMessage(
+                    HandshakeType.CertificateRequest, seq, requestBody));
+                transcript.Append(HandshakeType.CertificateRequest, seq, requestBody);
+                seq++;
+            }
+
+            byte[] doneBody = Array.Empty<byte>();
+            flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHelloDone, seq, doneBody));
+            transcript.Append(HandshakeType.ServerHelloDone, seq, doneBody);
+            ushort serverFinishedSeq = (ushort)(seq + 1);
+
+            recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
+                    transceiver, flight, recordSequence, cancellationToken)
+                .ConfigureAwait(false);
+
+            return await ReceiveClientFinishAndCompleteAsync(
+                    transceiver,
+                    options,
+                    suite,
+                    ecdhe,
+                    clientHello.Random,
+                    serverRandom,
+                    transcript,
+                    serverFinishedSeq,
+                    useExtendedMasterSecret,
+                    recordSequence,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            ecdhe?.Dispose();
+        }
+    }
+
+    // Appends the certificate-authenticated server flight messages (Certificate + signed
+    // ServerKeyExchange) and returns the server's ephemeral ECDHE key.
+    private static EcdheKeyExchange BuildCertificateFlight(
+        List<OutboundHandshakeMessage> flight,
+        Dtls12Transcript transcript,
+        ref ushort seq,
+        DtlsServerOptions options,
+        Dtls12ClientHello clientHello,
+        byte[] serverRandom,
+        bool useRawPublicKey)
+    {
+        X509Certificate2 serverCertificate = options.ServerCertificate!;
+        NamedGroup group = SelectGroup(clientHello);
+
+        EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
+        byte[] serverPoint = ecdhe.ExportKeyShare();
+        byte[] ecdhParams = Dtls12ServerKeyExchange.EncodeEcdhParams((ushort)group, serverPoint);
+
+        IReadOnlyList<ushort> clientAlgorithms = ParseClientSignatureAlgorithms(clientHello);
+        if (!Dtls12Signer.TrySelectAlgorithm(
+            serverCertificate, clientAlgorithms, out ushort signatureAlgorithm))
+        {
+            ecdhe.Dispose();
+            throw new DtlsException(
+                "No mutually supported signature algorithm for the server certificate.");
+        }
+
+        byte[] signedContent = Concat(clientHello.Random, serverRandom, ecdhParams);
+        byte[] signature = Dtls12Signer.Sign(serverCertificate, signatureAlgorithm, signedContent);
+        CryptographicOperations.ZeroMemory(signedContent);
+
+        // For raw public keys (RFC 7250) the Certificate carries a single SubjectPublicKeyInfo.
+        byte[] certificateEntry = useRawPublicKey
+            ? RawPublicKey.ExportSubjectPublicKeyInfo(serverCertificate)
+            : serverCertificate.RawData;
+        byte[] certificateBody = Dtls12Certificate.Encode(new[] { certificateEntry });
+        flight.Add(new OutboundHandshakeMessage(HandshakeType.Certificate, seq, certificateBody));
+        transcript.Append(HandshakeType.Certificate, seq, certificateBody);
+        seq++;
+
+        byte[] serverKeyExchange = Dtls12ServerKeyExchange.EncodeSigned(
+            ecdhParams, signatureAlgorithm, signature);
+        flight.Add(new OutboundHandshakeMessage(
+            HandshakeType.ServerKeyExchange, seq, serverKeyExchange));
+        transcript.Append(HandshakeType.ServerKeyExchange, seq, serverKeyExchange);
+        seq++;
+        return ecdhe;
+    }
+
+    // Appends the ECDHE_PSK ServerKeyExchange (empty identity hint + unsigned ECDHE params) and
+    // returns the server's ephemeral ECDHE key.
+    private static EcdheKeyExchange BuildEcdhePskFlight(
+        List<OutboundHandshakeMessage> flight,
+        Dtls12Transcript transcript,
+        ref ushort seq,
+        Dtls12ClientHello clientHello)
+    {
+        NamedGroup group = SelectGroup(clientHello);
+        EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
+        byte[] serverPoint = ecdhe.ExportKeyShare();
+        byte[] ecdhParams = Dtls12ServerKeyExchange.EncodeEcdhParams((ushort)group, serverPoint);
+
+        byte[] serverKeyExchange = Dtls12PskServerKeyExchange.EncodeEcdhePsk(
+            Array.Empty<byte>(), ecdhParams);
+        flight.Add(new OutboundHandshakeMessage(
+            HandshakeType.ServerKeyExchange, seq, serverKeyExchange));
+        transcript.Append(HandshakeType.ServerKeyExchange, seq, serverKeyExchange);
+        seq++;
+        return ecdhe;
+    }
+
+    private static async Task<DtlsConnection> ReceiveClientFinishAndCompleteAsync(
+        Dtls13FlightTransceiver transceiver,
+        DtlsServerOptions options,
+        Dtls12CipherSuite suite,
+        EcdheKeyExchange? ecdhe,
+        byte[] clientRandom,
+        byte[] serverRandom,
+        Dtls12Transcript transcript,
+        ushort serverFinishedSeq,
+        bool useExtendedMasterSecret,
+        ulong recordSequence,
+        CancellationToken cancellationToken)
+    {
+        HandshakeReassembler reassembler =
+            new(options.MaxHandshakeMessageSize, firstSequence: 2);
+        List<byte[]> bufferedProtected = new();
+
+        byte[]? masterSecret = null;
+        Dtls12RecordProtector? sendProtector = null;
+        Dtls12RecordProtector? receiveProtector = null;
+        bool clientCertificateRequired = options.RequireClientCertificate;
+        X509Certificate2? clientCertificate = null;
+        ushort pendingCertVerifyAlgorithm = 0;
+        byte[]? pendingCertVerifySignature = null;
+        byte[]? pendingCertVerifyContent = null;
+        byte[]? clientFinishedBody = null;
+
+        try
+        {
+            while (clientFinishedBody is null)
+            {
+                byte[] datagram = await transceiver.ReceiveFlightAsync(cancellationToken)
+                    .ConfigureAwait(false);
+
+                ReadOnlySpan<byte> remaining = datagram;
+                while (Dtls13PlaintextRecord.TryParse(
+                    remaining,
+                    out byte contentType,
+                    out ushort epoch,
+                    out _,
+                    out ReadOnlySpan<byte> fragment,
+                    out int consumed))
+                {
+                    ReadOnlySpan<byte> record = remaining.Slice(0, consumed);
+                    remaining = remaining.Slice(consumed);
+
+                    if (epoch == 0
+                        && contentType == Dtls13PlaintextRecord.HandshakeContentType)
+                    {
+                        Dtls13HandshakeFlight.OfferFragment(fragment, reassembler);
+                    }
+                    else if (epoch >= 1
+                        && contentType == Dtls13PlaintextRecord.HandshakeContentType)
+                    {
+                        bufferedProtected.Add(record.ToArray());
+                    }
+                }
+
+                while (reassembler.TryReadNext(
+                    out HandshakeType type, out byte[] body, out ushort sequence))
+                {
+                    ProcessClientPlaintextMessage(
+                        type,
+                        body,
+                        sequence,
+                        transcript,
+                        ref clientCertificate,
+                        ref pendingCertVerifyAlgorithm,
+                        ref pendingCertVerifySignature,
+                        ref pendingCertVerifyContent);
+
+                    if (type == HandshakeType.ClientKeyExchange)
+                    {
+                        DeriveKeys(
+                            suite,
+                            ecdhe,
+                            options.PskCallback,
+                            body,
+                            clientRandom,
+                            serverRandom,
+                            transcript,
+                            useExtendedMasterSecret,
+                            ref masterSecret,
+                            ref sendProtector,
+                            ref receiveProtector);
+                    }
+                }
+
+                if (receiveProtector is not null)
+                {
+                    clientFinishedBody = TryOpenFinished(bufferedProtected, receiveProtector);
+                }
+            }
+
+            if (suite.UsesCertificate)
+            {
+                VerifyClientAuthentication(
+                    clientCertificateRequired,
+                    clientCertificate,
+                    pendingCertVerifyAlgorithm,
+                    pendingCertVerifySignature,
+                    pendingCertVerifyContent,
+                    options);
+            }
+
+            byte[] expectedClient = Dtls12KeySchedule.VerifyData(
+                suite.PrfHash, masterSecret!, ClientFinishTranscriptHash(transcript),
+                clientFinished: true);
+            if (!CryptographicOperations.FixedTimeEquals(expectedClient, clientFinishedBody))
+            {
+                throw new DtlsException("The client Finished verify_data did not match.");
+            }
+
+            // Append the client Finished so the server Finished covers it.
+            transcript.Append(
+                HandshakeType.Finished, ClientFinishedSeq(reassembler), clientFinishedBody);
+
+            byte[] serverVerifyData = Dtls12KeySchedule.VerifyData(
+                suite.PrfHash, masterSecret!, transcript.CurrentHash(), clientFinished: false);
+            byte[] serverFinished = HandshakeMessage.Serialize(
+                HandshakeType.Finished, serverFinishedSeq, serverVerifyData);
+
+            List<byte[]> datagrams = Dtls12Flight.BuildFinalFlight(
+                Array.Empty<OutboundHandshakeMessage>(),
+                recordSequence,
+                sendProtector!,
+                serverFinished,
+                transceiver.Transport.MaxDatagramSize);
+            await Dtls12Flight.SendDatagramsAsync(transceiver, datagrams, cancellationToken)
+                .ConfigureAwait(false);
+
+            DtlsConnection connection = Dtls12Connection.Create(
+                transceiver.Transport, sendProtector!, receiveProtector!, sendSequenceStart: 1);
+            sendProtector = null;
+            receiveProtector = null;
+            return connection;
+        }
+        finally
+        {
+            clientCertificate?.Dispose();
+            if (masterSecret is not null)
+            {
+                CryptographicOperations.ZeroMemory(masterSecret);
+            }
+
+            sendProtector?.Dispose();
+            receiveProtector?.Dispose();
+        }
+    }
+
+    private static void ProcessClientPlaintextMessage(
+        HandshakeType type,
+        byte[] body,
+        ushort sequence,
+        Dtls12Transcript transcript,
+        ref X509Certificate2? clientCertificate,
+        ref ushort certVerifyAlgorithm,
+        ref byte[]? certVerifySignature,
+        ref byte[]? certVerifyContent)
+    {
+        // The CertificateVerify signs the transcript through ClientKeyExchange (it excludes the
+        // CertificateVerify message itself), so capture that snapshot before appending it.
+        if (type == HandshakeType.CertificateVerify)
+        {
+            certVerifyContent = transcript.CurrentBytes();
+        }
+
+        transcript.Append(type, sequence, body);
+        switch (type)
+        {
+            case HandshakeType.Certificate:
+                if (Dtls12Certificate.TryParse(body, out List<byte[]> certificates)
+                    && certificates.Count > 0)
+                {
+                    clientCertificate = LoadCertificate(certificates[0]);
+                }
+
+                break;
+            case HandshakeType.CertificateVerify:
+                if (Dtls12CertificateVerify.TryParse(
+                    body, out certVerifyAlgorithm, out byte[] signature))
+                {
+                    certVerifySignature = signature;
+                }
+
+                break;
+            case HandshakeType.ClientKeyExchange:
+                break;
+            default:
+                throw new DtlsException(
+                    "Unexpected DTLS 1.2 client message: " + type + ".");
+        }
+    }
+
+    private static void DeriveKeys(
+        Dtls12CipherSuite suite,
+        EcdheKeyExchange? ecdhe,
+        DtlsPskServerCallback? pskCallback,
+        byte[] clientKeyExchangeBody,
+        byte[] clientRandom,
+        byte[] serverRandom,
+        Dtls12Transcript transcript,
+        bool useExtendedMasterSecret,
+        ref byte[]? masterSecret,
+        ref Dtls12RecordProtector? sendProtector,
+        ref Dtls12RecordProtector? receiveProtector)
+    {
+        byte[] preMasterSecret = ResolvePreMasterSecret(
+            suite, ecdhe, pskCallback, clientKeyExchangeBody);
+
+        // The extended_master_secret session_hash spans messages through ClientKeyExchange.
+        masterSecret = useExtendedMasterSecret
+            ? Dtls12KeySchedule.ExtendedMasterSecret(
+                suite.PrfHash, preMasterSecret, transcript.CurrentHash())
+            : Dtls12KeySchedule.MasterSecret(
+                suite.PrfHash, preMasterSecret, clientRandom, serverRandom);
+        CryptographicOperations.ZeroMemory(preMasterSecret);
+
+        Dtls12KeyBlock keyBlock = Dtls12KeySchedule.KeyBlock(
+            suite.PrfHash, masterSecret, serverRandom, clientRandom, suite.KeyLength);
+        sendProtector = new Dtls12RecordProtector(
+            suite, keyBlock.ServerWriteKey, keyBlock.ServerWriteSalt);
+        receiveProtector = new Dtls12RecordProtector(
+            suite, keyBlock.ClientWriteKey, keyBlock.ClientWriteSalt);
+        keyBlock.Clear();
+    }
+
+    private static byte[] ResolvePreMasterSecret(
+        Dtls12CipherSuite suite,
+        EcdheKeyExchange? ecdhe,
+        DtlsPskServerCallback? pskCallback,
+        byte[] clientKeyExchangeBody)
+    {
+        if (suite.KeyExchange == Dtls12KeyExchange.EcdhePsk)
+        {
+            if (ecdhe is null
+                || !Dtls12ClientKeyExchange.TryParseEcdhePsk(
+                    clientKeyExchangeBody, out byte[] identity, out byte[] clientPoint))
+            {
+                throw new DtlsException("Malformed DTLS 1.2 ECDHE_PSK ClientKeyExchange.");
+            }
+
+            byte[] psk = ResolvePsk(pskCallback, identity);
+            byte[] ecdheSecret = ecdhe.DeriveSharedSecret(clientPoint);
+            byte[] pms = Dtls12KeySchedule.EcdhePskPreMasterSecret(ecdheSecret, psk);
+            CryptographicOperations.ZeroMemory(ecdheSecret);
+            CryptographicOperations.ZeroMemory(psk);
+            return pms;
+        }
+
+        if (suite.UsesPsk)
+        {
+            if (!Dtls12ClientKeyExchange.TryParsePsk(clientKeyExchangeBody, out byte[] identity))
+            {
+                throw new DtlsException("Malformed DTLS 1.2 PSK ClientKeyExchange.");
+            }
+
+            byte[] psk = ResolvePsk(pskCallback, identity);
+            byte[] pms = Dtls12KeySchedule.PlainPskPreMasterSecret(psk);
+            CryptographicOperations.ZeroMemory(psk);
+            return pms;
+        }
+
+        if (ecdhe is null
+            || !Dtls12ClientKeyExchange.TryParseEcdhe(clientKeyExchangeBody, out byte[] point))
+        {
+            throw new DtlsException("Malformed DTLS 1.2 ClientKeyExchange.");
+        }
+
+        return ecdhe.DeriveSharedSecret(point);
+    }
+
+    private static byte[] ResolvePsk(DtlsPskServerCallback? pskCallback, byte[] identity)
+    {
+        if (pskCallback is null)
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.HandshakeFailure, true, "The server has no PSK callback configured.");
+        }
+
+        ReadOnlyMemory<byte> key = pskCallback(identity);
+        if (key.IsEmpty)
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.UnknownPskIdentity, true, "The PSK identity was not recognised.");
+        }
+
+        return key.ToArray();
+    }
+
+    private static byte[]? TryOpenFinished(
+        List<byte[]> bufferedProtected,
+        Dtls12RecordProtector receiveProtector)
+    {
+        foreach (byte[] record in bufferedProtected)
+        {
+            if (receiveProtector.TryOpen(
+                    record, out byte contentType, out byte[] opened, out _, out _, out _)
+                && contentType == Dtls13PlaintextRecord.HandshakeContentType
+                && HandshakeMessage.TryParse(
+                    opened, out HandshakeMessageHeader header, out ReadOnlySpan<byte> body)
+                && header.MessageType == HandshakeType.Finished)
+            {
+                return body.ToArray();
+            }
+        }
+
+        return null;
+    }
+
+    // The client Finished verify_data hashes the transcript up to (but not including) the Finished;
+    // that is the transcript state right after the last client plaintext message.
+    private static byte[] ClientFinishTranscriptHash(Dtls12Transcript transcript)
+    {
+        return transcript.CurrentHash();
+    }
+
+    private static ushort ClientFinishedSeq(HandshakeReassembler reassembler)
+    {
+        return reassembler.NextExpectedSequence;
+    }
+
+    private static void VerifyClientAuthentication(
+        bool required,
+        X509Certificate2? clientCertificate,
+        ushort certVerifyAlgorithm,
+        byte[]? certVerifySignature,
+        byte[]? certVerifyContent,
+        DtlsServerOptions options)
+    {
+        if (clientCertificate is null)
+        {
+            if (required)
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.HandshakeFailure,
+                    true,
+                    "A client certificate was required but not provided.");
+            }
+
+            return;
+        }
+
+        if (certVerifySignature is null || certVerifyContent is null)
+        {
+            throw new DtlsException(
+                "The client Certificate was not followed by a CertificateVerify.");
+        }
+
+        if (!Dtls12Signer.Verify(
+            clientCertificate, certVerifyAlgorithm, certVerifyContent, certVerifySignature))
+        {
+            throw new DtlsException("The client CertificateVerify did not verify.");
+        }
+
+        if (options.ClientCertificateValidation is not null)
+        {
+            using X509Chain chain = new();
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+            chain.Build(clientCertificate);
+            if (!options.ClientCertificateValidation(clientCertificate, chain, false))
+            {
+                throw new DtlsAlertException(
+                    DtlsAlert.BadCertificate,
+                    true,
+                    "The client certificate was rejected by ClientCertificateValidation.");
+            }
+        }
+    }
+
+    private static IReadOnlyList<ushort> ParseClientSignatureAlgorithms(
+        Dtls12ClientHello clientHello)
+    {
+        if (ExtensionList.TryFind(
+                clientHello.Extensions,
+                ExtensionType.SignatureAlgorithms,
+                out HandshakeExtension ext)
+            && Dtls12Extensions.TryParseSignatureAlgorithms(ext.Data, out List<ushort> algorithms))
+        {
+            return algorithms;
+        }
+
+        return Array.Empty<ushort>();
+    }
+
+    private static Dtls12CipherSuite SelectCipherSuite(
+        Dtls12ClientHello clientHello,
+        DtlsServerOptions options)
+    {
+        bool hasCertificate = options.ServerCertificate is not null;
+        bool hasPsk = options.PskCallback is not null;
+
+        bool isEcdsa = false;
+        if (hasCertificate)
+        {
+            using ECDsa? ecdsa = options.ServerCertificate!.GetECDsaPublicKey();
+            isEcdsa = ecdsa is not null;
+        }
+
+        foreach (ushort id in clientHello.CipherSuites)
+        {
+            if (!Dtls12CipherSuite.TryGet(id, out Dtls12CipherSuite suite))
+            {
+                continue;
+            }
+
+            if (suite.UsesCertificate && hasCertificate)
+            {
+                bool suiteEcdsa = suite.KeyExchange == Dtls12KeyExchange.EcdheEcdsa;
+                if (suiteEcdsa == isEcdsa)
+                {
+                    return suite;
+                }
+            }
+            else if (suite.UsesPsk && hasPsk)
+            {
+                return suite;
+            }
+        }
+
+        throw new DtlsAlertException(
+            DtlsAlert.HandshakeFailure,
+            true,
+            "No mutually supported cipher suite for the server's credentials.");
+    }
+
+    private static NamedGroup SelectGroup(Dtls12ClientHello clientHello)
+    {
+        if (ExtensionList.TryFind(
+                clientHello.Extensions, ExtensionType.SupportedGroups, out HandshakeExtension ext)
+            && SupportedGroupsExtension.TryParse(ext.Data, out List<NamedGroup> groups))
+        {
+            foreach (NamedGroup group in groups)
+            {
+                if (EcdheKeyExchange.IsSupported(group))
+                {
+                    return group;
+                }
+            }
+        }
+
+        throw new DtlsException("No mutually supported named group for ECDHE.");
+    }
+
+    private static byte[] BuildServerHello(
+        byte[] serverRandom,
+        ushort cipherSuite,
+        bool useRawPublicKey,
+        bool useExtendedMasterSecret,
+        bool echoEcPointFormats,
+        bool echoRenegotiationInfo)
+    {
+        // A server MUST only send extensions the client offered (RFC 5246 section 7.4.1.4).
+        List<HandshakeExtension> extensions = new();
+
+        if (useExtendedMasterSecret)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ExtendedMasterSecret,
+                Dtls12Extensions.EncodeExtendedMasterSecret()));
+        }
+
+        if (echoRenegotiationInfo)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.RenegotiationInfo,
+                Dtls12Extensions.EncodeRenegotiationInfo()));
+        }
+
+        if (echoEcPointFormats)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.EcPointFormats, Dtls12Extensions.EncodeEcPointFormats()));
+        }
+
+        if (useRawPublicKey)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.ServerCertificateType,
+                ServerCertificateTypeExtension.EncodeServerHello(CertificateType.RawPublicKey)));
+        }
+
+        Dtls12ServerHello hello = new()
+        {
+            Random = serverRandom,
+            CipherSuite = cipherSuite,
+            Extensions = extensions,
+        };
+        return hello.Encode();
+    }
+
+    private static bool ClientHasScsv(Dtls12ClientHello clientHello)
+    {
+        foreach (ushort suite in clientHello.CipherSuites)
+        {
+            if (suite == Dtls12Extensions.RenegotiationInfoScsv)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ClientOffersRawPublicKey(Dtls12ClientHello clientHello)
+    {
+        if (!ExtensionList.TryFind(
+            clientHello.Extensions,
+            ExtensionType.ServerCertificateType,
+            out HandshakeExtension ext)
+            || !ServerCertificateTypeExtension.TryParseClientHello(
+                ext.Data, out List<CertificateType> types))
+        {
+            return false;
+        }
+
+        foreach (CertificateType type in types)
+        {
+            if (type == CertificateType.RawPublicKey)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static byte[] Concat(byte[] a, byte[] b, byte[] c)
+    {
+        byte[] result = new byte[a.Length + b.Length + c.Length];
+        a.CopyTo(result, 0);
+        b.CopyTo(result, a.Length);
+        c.CopyTo(result, a.Length + b.Length);
+        return result;
+    }
+
+    private static X509Certificate2 LoadCertificate(byte[] der)
+    {
+#if NET9_0_OR_GREATER
+        return X509CertificateLoader.LoadCertificate(der);
+#else
+        return new X509Certificate2(der);
+#endif
+    }
+
+    private static byte[] CreateCookieSecret()
+    {
+        byte[] secret = new byte[32];
+        RandomNumberGenerator.Fill(secret);
+        return secret;
+    }
+}

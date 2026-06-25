@@ -34,6 +34,13 @@ internal sealed class HandshakeReassembler
     }
 
     /// <summary>
+    /// The <c>message_seq</c> of the next in-order message expected (and not yet delivered). After
+    /// a flight has been fully read this is the sequence number the following flight's first
+    /// message will carry.
+    /// </summary>
+    public ushort NextExpectedSequence => _nextSequence;
+
+    /// <summary>
     /// Splits a complete handshake message body into fragment records (each a full DTLS handshake
     /// header plus a slice of the body) no larger than <paramref name="maxFragmentBodyLength"/>.
     /// A single fragment is produced for messages that already fit.

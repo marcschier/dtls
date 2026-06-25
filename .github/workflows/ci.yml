@@ -69,6 +69,22 @@ jobs:
       - name: Interop tests (vs OpenSSL)
         run: dotnet test tests/Dtls.Interop.Tests/Dtls.Interop.Tests.csproj -c Release --no-build
 
+  mobile-build:
+    name: Mobile build (android, ios)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+      - name: Install mobile workloads
+        run: dotnet workload install android ios
+      - name: Build mobile target frameworks (build-only)
+        run: dotnet build src/Dtls/Dtls.csproj -c Release -p:IncludeMobileTargets=true
+
   publish-github:
     name: Publish to GitHub Packages
     runs-on: ubuntu-latest
