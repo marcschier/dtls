@@ -213,6 +213,49 @@ public sealed class Dtls12ManagedHandshakeTests
         }
     }
 
+    [Fact]
+    public async Task VersionRange_DowngradesToManaged12_WhenServerIsDtls12Only()
+    {
+        using X509Certificate2 certificate = CreateEcdsaSelfSigned();
+        string thumbprint = certificate.Thumbprint;
+
+        (InMemoryDatagramTransport clientTransport, InMemoryDatagramTransport serverTransport) =
+            InMemoryDatagramTransport.CreatePair();
+
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+        using (clientTransport)
+        using (serverTransport)
+        {
+            // The server speaks only DTLS 1.2; the client offers the default 1.2..1.3 range and
+            // must negotiate down to DTLS 1.2 via the managed engine.
+            DtlsClientOptions clientOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls13,
+                RemoteCertificateValidation = (presented, _, _) =>
+                    string.Equals(
+                        presented.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase),
+            };
+
+            Task<DtlsConnection> serverTask = AcceptAsync(
+                serverTransport, ServerOptions(certificate), cts.Token);
+            Task<DtlsConnection> clientTask = DtlsClient.ConnectAsync(
+                clientTransport, clientOptions, cts.Token);
+
+            DtlsConnection[] connections = await Task.WhenAll(serverTask, clientTask);
+            using DtlsConnection serverConnection = connections[0];
+            using DtlsConnection clientConnection = connections[1];
+
+            Assert.Equal(DtlsProtocolVersion.Dtls12, serverConnection.NegotiatedVersion);
+            Assert.Equal(DtlsProtocolVersion.Dtls12, clientConnection.NegotiatedVersion);
+
+            await AssertEchoAsync(clientConnection, serverConnection, Encoding.ASCII.GetBytes(
+                "downgraded to dtls 1.2"), cts.Token);
+            await AssertEchoAsync(serverConnection, clientConnection, Encoding.ASCII.GetBytes(
+                "server reply over dtls 1.2"), cts.Token);
+        }
+    }
+
     private static async Task<DtlsConnection> AcceptAsync(
         InMemoryDatagramTransport transport,
         DtlsServerOptions options,

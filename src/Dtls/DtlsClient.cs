@@ -39,11 +39,16 @@ public static class DtlsClient
 
         options.Validate();
 
-        // Offering DTLS 1.3 is driven by the managed engine; a 1.2 fallback (when the peer
-        // selects <= 1.2) is restarted against the native backend by the engine.
+        // Offering DTLS 1.3 is driven by the managed engine. When the version range also permits
+        // DTLS 1.2 (and no PSK is configured), the certificate ClientHello offers both versions and
+        // the engine falls back to the managed DTLS 1.2 engine if the peer selects 1.2.
         if (options.MaximumVersion >= DtlsProtocolVersion.Dtls13)
         {
-            return ManagedDtls13Engine.ConnectAsync(transport, options, cancellationToken);
+            bool allowDtls12Fallback =
+                options.MinimumVersion <= DtlsProtocolVersion.Dtls12
+                && options.PskCallback is null;
+            return ManagedDtls13Engine.ConnectAsync(
+                transport, options, cancellationToken, allowDtls12Fallback);
         }
 
         // DTLS 1.0/1.2 prefer the native OS backend; where none exists (for example Android) the

@@ -14,6 +14,23 @@ OpenSSL, Schannel, and Apple Secure Transport / Network.framework do not current
 
 For DTLS 1.2, the native operating-system stack is preferred on Linux, Windows, and macOS. On platforms where no native DTLS backend is available (for example Android), a fully managed DTLS 1.2 engine — implemented in C# on the same BCL primitives as the DTLS 1.3 engine — is used as the universal fallback. The public `DtlsClient`/`DtlsServer` API selects the managed DTLS 1.2 engine automatically when `NativeDtlsBackend.ForCurrentPlatform()` returns no backend.
 
+### Version negotiation and DTLS 1.2 downgrade
+
+When the configured version range spans both versions (`MinimumVersion = Dtls12`,
+`MaximumVersion = Dtls13` — the default) and certificate authentication is used, the managed client
+offers **both** DTLS 1.3 and DTLS 1.2 in a single ClientHello (RFC 8446 section 4.2.1): the
+`supported_versions` extension lists DTLS 1.3 then DTLS 1.2, and the cipher-suite list and
+extensions include the DTLS 1.2 certificate suites alongside the DTLS 1.3 suites and `key_share`. A
+DTLS 1.3 peer selects 1.3 and the managed 1.3 engine completes the handshake; a DTLS 1.2 peer
+selects 1.2 (answering with a HelloVerifyRequest or its ServerHello flight) and the handshake is
+completed by the managed DTLS 1.2 engine, reusing the same transport without a restart.
+
+This lets a client at the default range complete a handshake with a DTLS 1.2-only managed peer
+without explicit configuration. Note that strict native DTLS 1.2-only servers (for example Schannel)
+may reject a ClientHello that carries the DTLS 1.3 `supported_versions`/`key_share` constructs; to
+interoperate with such a server, set `MaximumVersion = Dtls12` so a plain DTLS 1.2 ClientHello is
+sent. External-PSK handshakes do not downgrade (they pin the offered version).
+
 ### macOS native backend (Network.framework, Secure Transport fallback)
 
 On macOS the native DTLS path prefers Apple's modern **Network.framework**, whose secure-UDP transport negotiates **DTLS 1.2** (verified on the macOS CI runner, certificate auth). Because Network.framework owns its own UDP socket and exposes an asynchronous, Objective-C block-based API, the backend runs the DTLS endpoint over a private loopback socket and bridges the encrypted datagrams to and from the application's transport with an internal relay; the block callbacks are driven through a small Objective-C block ABI shim.

@@ -141,6 +141,75 @@ internal static class Dtls12ClientHandshake
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Continues a handshake that began as a DTLS 1.3 offer but was answered with DTLS 1.2
+    /// (RFC 8446 section 4.2.1 version negotiation). The transceiver has already sent the offered
+    /// ClientHello and received the server's first response; this completes the DTLS 1.2 handshake.
+    /// </summary>
+    public static async Task<DtlsConnection> ContinueFromFallbackAsync(
+        Dtls12FallbackState fallback,
+        DtlsClientOptions options,
+        CancellationToken cancellationToken)
+    {
+        Dtls13FlightTransceiver transceiver = fallback.Transceiver;
+        byte[] clientRandom = fallback.ClientRandom;
+        bool offerRawPublicKey = options.AllowRawPublicKeys;
+        IReadOnlyList<ushort> offeredSuites = Dtls12CipherSuite.DefaultIdsFor(
+            certificate: true, ecdhePsk: false, plainPsk: false);
+
+        var pending = new PendingTranscript();
+        IReadOnlyList<Dtls13HandshakeRecords.Message> serverFlight;
+        ushort clientMessageStartSeq;
+        ulong recordSequence = fallback.RecordSequence;
+
+        if (fallback.HelloVerifyCookie is { } cookie)
+        {
+            // The 1.2 server answered the offer with a HelloVerifyRequest; resend a 1.2 ClientHello
+            // carrying the cookie (message_seq 1) — the transcript starts here.
+            byte[] helloWithCookie = BuildClientHello(
+                clientRandom, cookie, offeredSuites, offerRawPublicKey);
+            pending.Defer(HandshakeType.ClientHello, 1, helloWithCookie);
+            recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
+                    transceiver,
+                    new[]
+                    {
+                        new OutboundHandshakeMessage(
+                            HandshakeType.ClientHello, 1, helloWithCookie),
+                    },
+                    recordSequence,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            HandshakeReassembler reassembler =
+                new(options.MaxHandshakeMessageSize, firstSequence: 1);
+            serverFlight = await Dtls12Flight.ReceivePlaintextFlightAsync(
+                    transceiver, reassembler, HandshakeType.ServerHelloDone, cancellationToken)
+                .ConfigureAwait(false);
+            clientMessageStartSeq = 2;
+        }
+        else
+        {
+            // The 1.2 server answered the offer directly with its hello flight (no cookie); the
+            // offered ClientHello (message_seq 0) starts the transcript.
+            pending.Defer(HandshakeType.ClientHello, 0, fallback.ClientHelloBody);
+            serverFlight = fallback.ServerFlight
+                ?? throw new DtlsException("The DTLS 1.2 fallback carried no server flight.");
+            clientMessageStartSeq = 1;
+        }
+
+        return await CompleteAsync(
+                transceiver,
+                options,
+                clientRandom,
+                offeredSuites,
+                pending,
+                serverFlight,
+                clientMessageStartSeq,
+                recordSequence,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private static async Task<DtlsConnection> CompleteAsync(
         Dtls13FlightTransceiver transceiver,
         DtlsClientOptions options,

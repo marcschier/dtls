@@ -17,19 +17,22 @@ internal sealed class ManagedDtls13Engine
     public static async Task<DtlsConnection> ConnectAsync(
         IDatagramTransport transport,
         DtlsClientOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowDtls12Fallback = false)
     {
         using CancellationTokenSource timeout = CreateTimeoutSource(
             options.HandshakeTimeout, cancellationToken);
         try
         {
+            // When the version range permits it, the certificate client offers both DTLS 1.3 and
+            // 1.2 and finishes on the managed DTLS 1.2 engine internally if the peer selects 1.2.
             return await Dtls13ClientHandshake
-                .RunAsync(transport, options, timeout.Token)
+                .RunAsync(transport, options, timeout.Token, allowDtls12Fallback)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new DtlsException("The DTLS 1.3 client handshake timed out.");
+            throw new DtlsException("The DTLS client handshake timed out.");
         }
     }
 
