@@ -108,6 +108,9 @@ internal static class Dtls12ServerHandshake
             && options.AllowRawPublicKeys
             && ClientOffersRawPublicKey(clientHello);
 
+        bool clientOfferedEcPointFormats = Dtls12Extensions.Has(
+            clientHello.Extensions, ExtensionType.EcPointFormats);
+
         Dtls12Transcript transcript = new(suite.PrfHash);
         transcript.Append(HandshakeType.ClientHello, 1, clientHelloBody);
 
@@ -116,7 +119,8 @@ internal static class Dtls12ServerHandshake
         ushort seq = 1;
 
         byte[] serverHelloBody = BuildServerHello(
-            serverRandom, suite.Id, useRawPublicKey, useExtendedMasterSecret);
+            serverRandom, suite.Id, useRawPublicKey, useExtendedMasterSecret,
+            clientOfferedEcPointFormats);
         flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHello, seq, serverHelloBody));
         transcript.Append(HandshakeType.ServerHello, seq, serverHelloBody);
         seq++;
@@ -702,19 +706,23 @@ internal static class Dtls12ServerHandshake
         byte[] serverRandom,
         ushort cipherSuite,
         bool useRawPublicKey,
-        bool useExtendedMasterSecret)
+        bool useExtendedMasterSecret,
+        bool echoEcPointFormats)
     {
-        List<HandshakeExtension> extensions = new()
-        {
-            new HandshakeExtension(
-                ExtensionType.EcPointFormats, Dtls12Extensions.EncodeEcPointFormats()),
-        };
+        // A server MUST only send extensions the client offered (RFC 5246 section 7.4.1.4).
+        List<HandshakeExtension> extensions = new();
 
         if (useExtendedMasterSecret)
         {
-            extensions.Insert(0, new HandshakeExtension(
+            extensions.Add(new HandshakeExtension(
                 ExtensionType.ExtendedMasterSecret,
                 Dtls12Extensions.EncodeExtendedMasterSecret()));
+        }
+
+        if (echoEcPointFormats)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.EcPointFormats, Dtls12Extensions.EncodeEcPointFormats()));
         }
 
         if (useRawPublicKey)
