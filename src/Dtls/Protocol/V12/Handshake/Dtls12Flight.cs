@@ -55,6 +55,25 @@ internal static class Dtls12Flight
         HandshakeType terminator,
         CancellationToken cancellationToken)
     {
+        return await ReceivePlaintextFlightAsync(
+                transceiver, reassembler, terminator, terminator, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Receives and reassembles a plaintext (epoch-0) flight, retransmitting the current outbound
+    /// flight on loss, until a message of type <paramref name="terminatorA"/> or
+    /// <paramref name="terminatorB"/> is reassembled. The two-terminator form lets the client
+    /// accept either a HelloVerifyRequest or, when the server omits the cookie exchange, the full
+    /// ServerHello flight terminated by ServerHelloDone.
+    /// </summary>
+    public static async Task<List<Dtls13HandshakeRecords.Message>> ReceivePlaintextFlightAsync(
+        Dtls13FlightTransceiver transceiver,
+        HandshakeReassembler reassembler,
+        HandshakeType terminatorA,
+        HandshakeType terminatorB,
+        CancellationToken cancellationToken)
+    {
         List<Dtls13HandshakeRecords.Message> messages = new();
         while (true)
         {
@@ -66,7 +85,7 @@ internal static class Dtls12Flight
                 out HandshakeType type, out byte[] body, out ushort sequence))
             {
                 messages.Add(new Dtls13HandshakeRecords.Message(type, body, sequence));
-                if (type == terminator)
+                if (type == terminatorA || type == terminatorB)
                 {
                     return messages;
                 }

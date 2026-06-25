@@ -1,0 +1,259 @@
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Dtls.Protocol.V12.Handshake;
+using Dtls.Transport;
+using Xunit;
+
+// CA2025: the in-memory transports are always awaited (via Task.WhenAll) before the enclosing
+// 'using' disposes them, so the handshake tasks never outlive the disposable instances.
+// VSTHRD003: the echo helper awaits the client/server handshake tasks that were started earlier in
+// the calling test method; there is no foreign synchronization context.
+#pragma warning disable CA2025
+#pragma warning disable VSTHRD003
+
+namespace Dtls.IntegrationTests;
+
+/// <summary>
+/// Cross-implementation interop tests between the managed DTLS 1.2 engine and the native OpenSSL
+/// DTLS 1.2 backend (the wire-correctness gate, RFC 6347 / RFC 5246). On Linux the public
+/// <see cref="DtlsServer"/>/<see cref="DtlsClient"/> route a DTLS 1.2 handshake to the OpenSSL
+/// backend; the managed engine is driven directly on the opposing endpoint. Both directions and
+/// both authentication modes (certificate and PSK) are exercised. The whole test no-ops off Linux,
+/// where the OpenSSL backend is unavailable.
+/// </summary>
+public sealed class Dtls12ManagedOpenSslInteropTests
+{
+    private static readonly byte[] PskIdentity = Encoding.UTF8.GetBytes("dtls12-managed-interop");
+    private static readonly byte[] PskKey = RandomNumberGenerator.GetBytes(32);
+
+    [Fact]
+    public async Task ManagedClient_OpenSslServer_Certificate_Interops()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return;
+        }
+
+        using X509Certificate2 certificate = CreateEcdsaCertificate();
+        string thumbprint = certificate.Thumbprint;
+
+        (InMemoryDatagramTransport clientTransport, InMemoryDatagramTransport serverTransport) =
+            InMemoryDatagramTransport.CreatePair();
+
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(20));
+        using (clientTransport)
+        using (serverTransport)
+        {
+            DtlsServer server = new(new DtlsServerOptions
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                ServerCertificate = certificate,
+                HandshakeTimeout = TimeSpan.FromSeconds(20),
+            });
+
+            DtlsClientOptions clientOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                RemoteCertificateValidation = (presented, _, _) =>
+                    string.Equals(
+                        presented.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase),
+            };
+
+            Task<DtlsConnection> serverTask = server.AcceptAsync(serverTransport, cts.Token);
+            Task<DtlsConnection> clientTask = Dtls12ClientHandshake.RunAsync(
+                clientTransport, clientOptions, cts.Token);
+
+            await RunEchoAsync(serverTask, clientTask, cts.Token);
+        }
+    }
+
+    [Fact]
+    public async Task OpenSslClient_ManagedServer_Certificate_Interops()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return;
+        }
+
+        using X509Certificate2 certificate = CreateEcdsaCertificate();
+        string thumbprint = certificate.Thumbprint;
+
+        (InMemoryDatagramTransport clientTransport, InMemoryDatagramTransport serverTransport) =
+            InMemoryDatagramTransport.CreatePair();
+
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(20));
+        using (clientTransport)
+        using (serverTransport)
+        {
+            DtlsServerOptions serverOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                ServerCertificate = certificate,
+                HandshakeTimeout = TimeSpan.FromSeconds(20),
+            };
+
+            DtlsClientOptions clientOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                TargetHost = "localhost",
+                RemoteCertificateValidation = (presented, _, _) =>
+                    string.Equals(
+                        presented.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase),
+                HandshakeTimeout = TimeSpan.FromSeconds(20),
+            };
+
+            Task<DtlsConnection> serverTask = AcceptManagedAsync(
+                serverTransport, serverOptions, cts.Token);
+            Task<DtlsConnection> clientTask = DtlsClient.ConnectAsync(
+                clientTransport, clientOptions, cts.Token);
+
+            await RunEchoAsync(serverTask, clientTask, cts.Token);
+        }
+    }
+
+    [Fact]
+    public async Task ManagedClient_OpenSslServer_Psk_Interops()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return;
+        }
+
+        (InMemoryDatagramTransport clientTransport, InMemoryDatagramTransport serverTransport) =
+            InMemoryDatagramTransport.CreatePair();
+
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(20));
+        using (clientTransport)
+        using (serverTransport)
+        {
+            DtlsServer server = new(new DtlsServerOptions
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                PskCallback = identity =>
+                    identity.Span.SequenceEqual(PskIdentity) ? PskKey : ReadOnlyMemory<byte>.Empty,
+                HandshakeTimeout = TimeSpan.FromSeconds(20),
+            });
+
+            DtlsClientOptions clientOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                PskCallback = _ => new PskCredential(PskIdentity, PskKey),
+            };
+
+            Task<DtlsConnection> serverTask = server.AcceptAsync(serverTransport, cts.Token);
+            Task<DtlsConnection> clientTask = Dtls12ClientHandshake.RunAsync(
+                clientTransport, clientOptions, cts.Token);
+
+            await RunEchoAsync(serverTask, clientTask, cts.Token);
+        }
+    }
+
+    [Fact]
+    public async Task OpenSslClient_ManagedServer_Psk_Interops()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return;
+        }
+
+        (InMemoryDatagramTransport clientTransport, InMemoryDatagramTransport serverTransport) =
+            InMemoryDatagramTransport.CreatePair();
+
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(20));
+        using (clientTransport)
+        using (serverTransport)
+        {
+            DtlsServerOptions serverOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                PskCallback = identity =>
+                    identity.Span.SequenceEqual(PskIdentity) ? PskKey : ReadOnlyMemory<byte>.Empty,
+                HandshakeTimeout = TimeSpan.FromSeconds(20),
+            };
+
+            DtlsClientOptions clientOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                PskCallback = _ => new PskCredential(PskIdentity, PskKey),
+                HandshakeTimeout = TimeSpan.FromSeconds(20),
+            };
+
+            Task<DtlsConnection> serverTask = AcceptManagedAsync(
+                serverTransport, serverOptions, cts.Token);
+            Task<DtlsConnection> clientTask = DtlsClient.ConnectAsync(
+                clientTransport, clientOptions, cts.Token);
+
+            await RunEchoAsync(serverTask, clientTask, cts.Token);
+        }
+    }
+
+    private static async Task<DtlsConnection> AcceptManagedAsync(
+        InMemoryDatagramTransport transport,
+        DtlsServerOptions options,
+        CancellationToken cancellationToken)
+    {
+        byte[] buffer = new byte[transport.MaxDatagramSize];
+        int received = await transport.ReceiveAsync(buffer, cancellationToken);
+        byte[] initialDatagram = buffer.AsSpan(0, received).ToArray();
+        return await Dtls12ServerHandshake.RunAsync(
+            transport, options, initialDatagram, cancellationToken);
+    }
+
+    private static async Task RunEchoAsync(
+        Task<DtlsConnection> serverTask,
+        Task<DtlsConnection> clientTask,
+        CancellationToken cancellationToken)
+    {
+        DtlsConnection[] connections = await Task.WhenAll(serverTask, clientTask);
+        using DtlsConnection serverConnection = connections[0];
+        using DtlsConnection clientConnection = connections[1];
+
+        Assert.Equal(DtlsProtocolVersion.Dtls12, serverConnection.NegotiatedVersion);
+        Assert.Equal(DtlsProtocolVersion.Dtls12, clientConnection.NegotiatedVersion);
+
+        await AssertEchoAsync(clientConnection, serverConnection, Encoding.ASCII.GetBytes(
+            "managed/openssl interop, client to server"), cancellationToken);
+        await AssertEchoAsync(serverConnection, clientConnection, Encoding.ASCII.GetBytes(
+            "managed/openssl interop, server to client"), cancellationToken);
+    }
+
+    private static async Task AssertEchoAsync(
+        DtlsConnection sender,
+        DtlsConnection receiver,
+        byte[] payload,
+        CancellationToken cancellationToken)
+    {
+        await sender.SendAsync(payload, cancellationToken);
+
+        byte[] buffer = new byte[payload.Length + 64];
+        int read = await receiver.ReceiveAsync(buffer, cancellationToken);
+
+        Assert.Equal(payload.Length, read);
+        Assert.Equal(payload, buffer.AsSpan(0, read).ToArray());
+    }
+
+    private static X509Certificate2 CreateEcdsaCertificate()
+    {
+        using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        CertificateRequest request = new(
+            "CN=dtls12-managed-interop", key, HashAlgorithmName.SHA256);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        return request.CreateSelfSigned(now.AddMinutes(-5), now.AddHours(1));
+    }
+}
+
+#pragma warning restore CA2025
+#pragma warning restore VSTHRD003

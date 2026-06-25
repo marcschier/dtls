@@ -67,48 +67,66 @@ internal static class Dtls12ClientHandshake
                 cancellationToken)
             .ConfigureAwait(false);
 
-        // Flight 2: HelloVerifyRequest with the stateless cookie.
-        HandshakeReassembler verifyReassembler =
+        // Flight 2: either a HelloVerifyRequest (the server requires the cookie exchange) or, when
+        // the server omits it (for example OpenSSL with SSL_accept), the ServerHello flight itself.
+        HandshakeReassembler firstReassembler =
             new(options.MaxHandshakeMessageSize, firstSequence: 0);
-        List<Dtls13HandshakeRecords.Message> verifyFlight =
+        List<Dtls13HandshakeRecords.Message> firstFlight =
             await Dtls12Flight.ReceivePlaintextFlightAsync(
                     transceiver,
-                    verifyReassembler,
+                    firstReassembler,
                     HandshakeType.HelloVerifyRequest,
+                    HandshakeType.ServerHelloDone,
                     cancellationToken)
                 .ConfigureAwait(false);
-        if (verifyFlight.Count != 1
-            || verifyFlight[0].Type != HandshakeType.HelloVerifyRequest
-            || !Dtls12HelloVerifyRequest.TryParse(verifyFlight[0].Body, out byte[] cookie))
-        {
-            throw new DtlsException("Expected a HelloVerifyRequest from the server.");
-        }
 
-        // Flight 3: ClientHello with the cookie (message_seq 1) — the transcript starts here.
-        byte[] helloWithCookie = BuildClientHello(
-            clientRandom, cookie, offeredSuites, offerRawPublicKey);
         var transcript = new PendingTranscript();
-        transcript.Defer(HandshakeType.ClientHello, 1, helloWithCookie);
-        recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
-                transceiver,
-                new[]
-                {
-                    new OutboundHandshakeMessage(HandshakeType.ClientHello, 1, helloWithCookie),
-                },
-                recordSequence,
-                cancellationToken)
-            .ConfigureAwait(false);
+        List<Dtls13HandshakeRecords.Message> serverFlight;
+        ushort clientMessageStartSeq;
 
-        // Flight 4: the server's hello flight, terminated by ServerHelloDone (message_seq 1+).
-        HandshakeReassembler serverReassembler =
-            new(options.MaxHandshakeMessageSize, firstSequence: 1);
-        List<Dtls13HandshakeRecords.Message> serverFlight =
-            await Dtls12Flight.ReceivePlaintextFlightAsync(
+        if (firstFlight.Count == 1
+            && firstFlight[0].Type == HandshakeType.HelloVerifyRequest)
+        {
+            if (!Dtls12HelloVerifyRequest.TryParse(firstFlight[0].Body, out byte[] cookie))
+            {
+                throw new DtlsException("Malformed HelloVerifyRequest.");
+            }
+
+            // Flight 3: ClientHello with the cookie (message_seq 1) — the transcript starts here;
+            // the initial cookieless ClientHello and the HelloVerifyRequest are excluded.
+            byte[] helloWithCookie = BuildClientHello(
+                clientRandom, cookie, offeredSuites, offerRawPublicKey);
+            transcript.Defer(HandshakeType.ClientHello, 1, helloWithCookie);
+            recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
+                    transceiver,
+                    new[]
+                    {
+                        new OutboundHandshakeMessage(
+                            HandshakeType.ClientHello, 1, helloWithCookie),
+                    },
+                    recordSequence,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            // Flight 4: the server's hello flight, terminated by ServerHelloDone (message_seq 1+).
+            HandshakeReassembler serverReassembler =
+                new(options.MaxHandshakeMessageSize, firstSequence: 1);
+            serverFlight = await Dtls12Flight.ReceivePlaintextFlightAsync(
                     transceiver,
                     serverReassembler,
                     HandshakeType.ServerHelloDone,
                     cancellationToken)
                 .ConfigureAwait(false);
+            clientMessageStartSeq = 2;
+        }
+        else
+        {
+            // No cookie exchange: the (only) cookieless ClientHello starts the transcript and the
+            // server flight begins at message_seq 0.
+            transcript.Defer(HandshakeType.ClientHello, 0, helloNoCookie);
+            serverFlight = firstFlight;
+            clientMessageStartSeq = 1;
+        }
 
         return await CompleteAsync(
                 transceiver,
@@ -117,6 +135,7 @@ internal static class Dtls12ClientHandshake
                 offeredSuites,
                 transcript,
                 serverFlight,
+                clientMessageStartSeq,
                 recordSequence,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -129,6 +148,7 @@ internal static class Dtls12ClientHandshake
         IReadOnlyList<ushort> offeredSuites,
         PendingTranscript pending,
         IReadOnlyList<Dtls13HandshakeRecords.Message> serverFlight,
+        ushort clientMessageStartSeq,
         ulong recordSequence,
         CancellationToken cancellationToken)
     {
@@ -139,11 +159,8 @@ internal static class Dtls12ClientHandshake
             throw new DtlsException("The server selected an unsupported DTLS 1.2 cipher suite.");
         }
 
-        if (!Dtls12Extensions.Has(serverHello.Extensions, ExtensionType.ExtendedMasterSecret))
-        {
-            throw new DtlsException(
-                "The server did not negotiate the extended_master_secret extension.");
-        }
+        bool useExtendedMasterSecret = Dtls12Extensions.Has(
+            serverHello.Extensions, ExtensionType.ExtendedMasterSecret);
 
         Dtls12Transcript transcript = new(suite.PrfHash);
         pending.Flush(transcript);
@@ -162,6 +179,8 @@ internal static class Dtls12ClientHandshake
                     clientRandom,
                     transcript,
                     serverFlight,
+                    clientMessageStartSeq,
+                    useExtendedMasterSecret,
                     recordSequence,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -177,6 +196,8 @@ internal static class Dtls12ClientHandshake
                 pending,
                 transcript,
                 serverFlight,
+                clientMessageStartSeq,
+                useExtendedMasterSecret,
                 recordSequence,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -192,6 +213,8 @@ internal static class Dtls12ClientHandshake
         PendingTranscript pending,
         Dtls12Transcript transcript,
         IReadOnlyList<Dtls13HandshakeRecords.Message> serverFlight,
+        ushort clientMessageStartSeq,
+        bool useExtendedMasterSecret,
         ulong recordSequence,
         CancellationToken cancellationToken)
     {
@@ -228,8 +251,8 @@ internal static class Dtls12ClientHandshake
         byte[] clientPoint = ecdhe.ExportKeyShare();
         byte[] preMasterSecret = ecdhe.DeriveSharedSecret(parts.ServerPoint);
 
-        // Client flight messages (message_seq continues from the cookie ClientHello = 1).
-        ushort messageSeq = 2;
+        // Client flight messages (message_seq continues from the last ClientHello sent).
+        ushort messageSeq = clientMessageStartSeq;
         List<OutboundHandshakeMessage> clientMessages = new();
 
         if (parts.CertificateRequested)
@@ -270,6 +293,7 @@ internal static class Dtls12ClientHandshake
                 messageSeq,
                 recordSequence,
                 NextServerSequence(serverFlight),
+                useExtendedMasterSecret,
                 options.MaxHandshakeMessageSize,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -283,6 +307,8 @@ internal static class Dtls12ClientHandshake
         byte[] clientRandom,
         Dtls12Transcript transcript,
         IReadOnlyList<Dtls13HandshakeRecords.Message> serverFlight,
+        ushort clientMessageStartSeq,
+        bool useExtendedMasterSecret,
         ulong recordSequence,
         CancellationToken cancellationToken)
     {
@@ -295,7 +321,7 @@ internal static class Dtls12ClientHandshake
         byte[] identity = credential.Identity.ToArray();
         byte[] psk = credential.Key.ToArray();
 
-        ushort messageSeq = 2;
+        ushort messageSeq = clientMessageStartSeq;
         List<OutboundHandshakeMessage> clientMessages = new();
         byte[] preMasterSecret;
         EcdheKeyExchange? ecdhe = null;
@@ -349,6 +375,7 @@ internal static class Dtls12ClientHandshake
                 messageSeq,
                 recordSequence,
                 NextServerSequence(serverFlight),
+                useExtendedMasterSecret,
                 options.MaxHandshakeMessageSize,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -368,12 +395,15 @@ internal static class Dtls12ClientHandshake
         ushort messageSeq,
         ulong recordSequence,
         ushort serverNextSequence,
+        bool useExtendedMasterSecret,
         int maxHandshakeMessageSize,
         CancellationToken cancellationToken)
     {
-        byte[] sessionHash = transcript.CurrentHash();
-        byte[] masterSecret = Dtls12KeySchedule.ExtendedMasterSecret(
-            suite.PrfHash, preMasterSecret, sessionHash);
+        byte[] masterSecret = useExtendedMasterSecret
+            ? Dtls12KeySchedule.ExtendedMasterSecret(
+                suite.PrfHash, preMasterSecret, transcript.CurrentHash())
+            : Dtls12KeySchedule.MasterSecret(
+                suite.PrfHash, preMasterSecret, clientRandom, serverRandom);
         CryptographicOperations.ZeroMemory(preMasterSecret);
 
         Dtls12KeyBlock keyBlock = Dtls12KeySchedule.KeyBlock(

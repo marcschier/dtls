@@ -98,11 +98,8 @@ internal static class Dtls12ServerHandshake
     {
         Dtls12CipherSuite suite = SelectCipherSuite(clientHello, options);
 
-        if (!Dtls12Extensions.Has(clientHello.Extensions, ExtensionType.ExtendedMasterSecret))
-        {
-            throw new DtlsException(
-                "The client did not offer the extended_master_secret extension.");
-        }
+        bool useExtendedMasterSecret = Dtls12Extensions.Has(
+            clientHello.Extensions, ExtensionType.ExtendedMasterSecret);
 
         byte[] serverRandom = new byte[Dtls12ClientHello.RandomLength];
         RandomNumberGenerator.Fill(serverRandom);
@@ -118,7 +115,8 @@ internal static class Dtls12ServerHandshake
         List<OutboundHandshakeMessage> flight = new();
         ushort seq = 1;
 
-        byte[] serverHelloBody = BuildServerHello(serverRandom, suite.Id, useRawPublicKey);
+        byte[] serverHelloBody = BuildServerHello(
+            serverRandom, suite.Id, useRawPublicKey, useExtendedMasterSecret);
         flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHello, seq, serverHelloBody));
         transcript.Append(HandshakeType.ServerHello, seq, serverHelloBody);
         seq++;
@@ -174,6 +172,7 @@ internal static class Dtls12ServerHandshake
                     serverRandom,
                     transcript,
                     serverFinishedSeq,
+                    useExtendedMasterSecret,
                     recordSequence,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -264,6 +263,7 @@ internal static class Dtls12ServerHandshake
         byte[] serverRandom,
         Dtls12Transcript transcript,
         ushort serverFinishedSeq,
+        bool useExtendedMasterSecret,
         ulong recordSequence,
         CancellationToken cancellationToken)
     {
@@ -335,6 +335,7 @@ internal static class Dtls12ServerHandshake
                             clientRandom,
                             serverRandom,
                             transcript,
+                            useExtendedMasterSecret,
                             ref masterSecret,
                             ref sendProtector,
                             ref receiveProtector);
@@ -455,6 +456,7 @@ internal static class Dtls12ServerHandshake
         byte[] clientRandom,
         byte[] serverRandom,
         Dtls12Transcript transcript,
+        bool useExtendedMasterSecret,
         ref byte[]? masterSecret,
         ref Dtls12RecordProtector? sendProtector,
         ref Dtls12RecordProtector? receiveProtector)
@@ -463,9 +465,11 @@ internal static class Dtls12ServerHandshake
             suite, ecdhe, pskCallback, clientKeyExchangeBody);
 
         // The extended_master_secret session_hash spans messages through ClientKeyExchange.
-        byte[] sessionHash = transcript.CurrentHash();
-        masterSecret = Dtls12KeySchedule.ExtendedMasterSecret(
-            suite.PrfHash, preMasterSecret, sessionHash);
+        masterSecret = useExtendedMasterSecret
+            ? Dtls12KeySchedule.ExtendedMasterSecret(
+                suite.PrfHash, preMasterSecret, transcript.CurrentHash())
+            : Dtls12KeySchedule.MasterSecret(
+                suite.PrfHash, preMasterSecret, clientRandom, serverRandom);
         CryptographicOperations.ZeroMemory(preMasterSecret);
 
         Dtls12KeyBlock keyBlock = Dtls12KeySchedule.KeyBlock(
@@ -697,16 +701,21 @@ internal static class Dtls12ServerHandshake
     private static byte[] BuildServerHello(
         byte[] serverRandom,
         ushort cipherSuite,
-        bool useRawPublicKey)
+        bool useRawPublicKey,
+        bool useExtendedMasterSecret)
     {
         List<HandshakeExtension> extensions = new()
         {
             new HandshakeExtension(
-                ExtensionType.ExtendedMasterSecret,
-                Dtls12Extensions.EncodeExtendedMasterSecret()),
-            new HandshakeExtension(
                 ExtensionType.EcPointFormats, Dtls12Extensions.EncodeEcPointFormats()),
         };
+
+        if (useExtendedMasterSecret)
+        {
+            extensions.Insert(0, new HandshakeExtension(
+                ExtensionType.ExtendedMasterSecret,
+                Dtls12Extensions.EncodeExtendedMasterSecret()));
+        }
 
         if (useRawPublicKey)
         {
