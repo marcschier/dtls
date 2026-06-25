@@ -31,7 +31,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          id=dtls
+          id=dtlssharp
           index=https://nuget.pkg.github.com/marcschier/index.json
           auth="Authorization: Bearer ${GH_TOKEN}"
           base=$(curl -fsSL -H "$auth" "$index" \

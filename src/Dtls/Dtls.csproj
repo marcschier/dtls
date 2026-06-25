@@ -16,7 +16,7 @@
     <SupportedOSPlatformVersion Condition="$(TargetFramework.EndsWith('-android'))">26.0</SupportedOSPlatformVersion>
 
     <!-- Packaging -->
-    <PackageId>Dtls</PackageId>
+    <PackageId>DtlsSharp</PackageId>
     <Description>Cross-platform DTLS 1.0/1.2/1.3 for .NET using the host OS cryptography.</Description>
     <Authors>marcschier</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
