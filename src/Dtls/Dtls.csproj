@@ -33,6 +33,12 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
+  <!-- The BCL AES-CCM primitive is unavailable on Apple mobile platforms; the CCM cipher suites
+       are compiled out there (AES-GCM remains available). -->
+  <PropertyGroup Condition="$(TargetFramework.EndsWith('-ios')) or $(TargetFramework.EndsWith('-maccatalyst')) or $(TargetFramework.EndsWith('-tvos'))">
+    <DefineConstants>$(DefineConstants);DTLS_NO_AESCCM</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>

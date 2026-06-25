@@ -1,4 +1,4 @@
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
 using System;
 using System.Security.Cryptography;
 

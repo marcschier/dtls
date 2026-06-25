@@ -138,7 +138,7 @@ internal sealed class Dtls13RecordKeys : IDisposable
                 return new AesGcmCipher(_writeKey);
             case Dtls13AeadKind.ChaCha20Poly1305:
                 return new ChaCha20Poly1305Cipher(_writeKey);
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
             case Dtls13AeadKind.AesCcm:
                 return new AesCcmCipher(_writeKey, CipherSuite.TagLength);
 #endif

@@ -114,7 +114,7 @@ internal readonly struct Dtls12CipherSuite : IEquatable<Dtls12CipherSuite>
             case 0x00A9:
                 suite = new(id, Dtls12KeyExchange.Psk, Sha384, 32, 16, Gcm);
                 return true;
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
             case 0xC0AC:
                 suite = new(id, Dtls12KeyExchange.EcdheEcdsa, Sha256, 16, 16, Ccm);
                 return CcmSupported;
@@ -158,7 +158,7 @@ internal readonly struct Dtls12CipherSuite : IEquatable<Dtls12CipherSuite>
 
     private const Dtls13AeadKind Gcm = Dtls13AeadKind.AesGcm;
 
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
     private const Dtls13AeadKind Ccm = Dtls13AeadKind.AesCcm;
 
     private static readonly bool CcmSupported = AesCcm.IsSupported;

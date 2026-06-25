@@ -68,7 +68,7 @@ internal readonly struct Dtls13CipherSuite : IEquatable<Dtls13CipherSuite>
         16,
         Dtls13AeadKind.ChaCha20Poly1305);
 
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
     /// <summary>TLS_AES_128_CCM_SHA256 (0x1304). Requires .NET 8 or later.</summary>
     public static Dtls13CipherSuite Aes128CcmSha256 { get; } = new(
         0x1304,
@@ -99,7 +99,7 @@ internal readonly struct Dtls13CipherSuite : IEquatable<Dtls13CipherSuite>
 
     private static Dtls13CipherSuite[] BuildSupportedDefault()
     {
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
         if (CcmSupported)
         {
             return new[]
@@ -152,7 +152,7 @@ internal readonly struct Dtls13CipherSuite : IEquatable<Dtls13CipherSuite>
             case 0x1303:
                 suite = ChaCha20Poly1305Sha256;
                 return true;
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
             case 0x1304:
                 suite = Aes128CcmSha256;
                 return CcmSupported;

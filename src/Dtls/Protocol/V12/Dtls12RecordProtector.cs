@@ -182,7 +182,7 @@ internal sealed class Dtls12RecordProtector : IDisposable
             case Dtls13AeadKind.AesGcm:
                 aead = new AesGcmCipher(key);
                 break;
-#if NET8_0_OR_GREATER
+#if NET8_0_OR_GREATER && !DTLS_NO_AESCCM
             case Dtls13AeadKind.AesCcm:
                 aead = new AesCcmCipher(key, suite.TagLength);
                 break;
