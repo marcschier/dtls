@@ -37,6 +37,55 @@ public sealed class Dtls12ManagedHandshakeTests
     }
 
     [Fact]
+    public async Task EcdhePsk_FullHandshake_ExchangesProtectedData()
+    {
+        byte[] identity = Encoding.ASCII.GetBytes("dtls12-psk-identity");
+        byte[] key = RandomNumberGenerator.GetBytes(32);
+
+        (InMemoryDatagramTransport clientTransport, InMemoryDatagramTransport serverTransport) =
+            InMemoryDatagramTransport.CreatePair();
+
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+        using (clientTransport)
+        using (serverTransport)
+        {
+            DtlsClientOptions clientOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                PskCallback = _ => new PskCredential(identity, key),
+            };
+
+            DtlsServerOptions serverOptions = new()
+            {
+                MinimumVersion = DtlsProtocolVersion.Dtls12,
+                MaximumVersion = DtlsProtocolVersion.Dtls12,
+                PskCallback = presented =>
+                    presented.Span.SequenceEqual(identity)
+                        ? key
+                        : ReadOnlyMemory<byte>.Empty,
+            };
+
+            Task<DtlsConnection> serverTask = AcceptAsync(
+                serverTransport, serverOptions, cts.Token);
+            Task<DtlsConnection> clientTask = Dtls12ClientHandshake.RunAsync(
+                clientTransport, clientOptions, cts.Token);
+
+            DtlsConnection[] connections = await Task.WhenAll(serverTask, clientTask);
+            using DtlsConnection serverConnection = connections[0];
+            using DtlsConnection clientConnection = connections[1];
+
+            Assert.Equal(DtlsProtocolVersion.Dtls12, serverConnection.NegotiatedVersion);
+            Assert.Equal(DtlsProtocolVersion.Dtls12, clientConnection.NegotiatedVersion);
+
+            await AssertEchoAsync(clientConnection, serverConnection, Encoding.ASCII.GetBytes(
+                "hello from the dtls 1.2 ecdhe-psk client"), cts.Token);
+            await AssertEchoAsync(serverConnection, clientConnection, Encoding.ASCII.GetBytes(
+                "hello back from the dtls 1.2 ecdhe-psk server"), cts.Token);
+        }
+    }
+
+    [Fact]
     public async Task RejectedCertificate_FailsHandshake()
     {
         using X509Certificate2 certificate = CreateEcdsaSelfSigned();

@@ -62,4 +62,7 @@ public enum DtlsAlert
 
     /// <summary>An unsupported extension was received.</summary>
     UnsupportedExtension = 110,
+
+    /// <summary>The PSK identity was not recognised (RFC 4279 section 2).</summary>
+    UnknownPskIdentity = 115,
 }

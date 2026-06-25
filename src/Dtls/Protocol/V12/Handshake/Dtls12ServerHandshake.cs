@@ -29,10 +29,10 @@ internal static class Dtls12ServerHandshake
         ReadOnlyMemory<byte> initialDatagram,
         CancellationToken cancellationToken)
     {
-        if (options.ServerCertificate is null)
+        if (options.ServerCertificate is null && options.PskCallback is null)
         {
             throw new DtlsException(
-                "The managed DTLS 1.2 server requires a ServerCertificate.");
+                "The managed DTLS 1.2 server requires a ServerCertificate or a PskCallback.");
         }
 
         if (!Dtls13HandshakeRecords.TryReadPlaintextHandshake(
@@ -96,9 +96,7 @@ internal static class Dtls12ServerHandshake
         ulong recordSequence,
         CancellationToken cancellationToken)
     {
-        X509Certificate2 serverCertificate = options.ServerCertificate!;
-        Dtls12CipherSuite suite = SelectCipherSuite(clientHello, serverCertificate);
-        NamedGroup group = SelectGroup(clientHello);
+        Dtls12CipherSuite suite = SelectCipherSuite(clientHello, options);
 
         if (!Dtls12Extensions.Has(clientHello.Extensions, ExtensionType.ExtendedMasterSecret))
         {
@@ -112,22 +110,6 @@ internal static class Dtls12ServerHandshake
         Dtls12Transcript transcript = new(suite.PrfHash);
         transcript.Append(HandshakeType.ClientHello, 1, clientHelloBody);
 
-        using EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
-        byte[] serverPoint = ecdhe.ExportKeyShare();
-        byte[] ecdhParams = Dtls12ServerKeyExchange.EncodeEcdhParams((ushort)group, serverPoint);
-
-        IReadOnlyList<ushort> clientAlgorithms = ParseClientSignatureAlgorithms(clientHello);
-        if (!Dtls12Signer.TrySelectAlgorithm(
-            serverCertificate, clientAlgorithms, out ushort signatureAlgorithm))
-        {
-            throw new DtlsException(
-                "No mutually supported signature algorithm for the server certificate.");
-        }
-
-        byte[] signedContent = Concat(clientHello.Random, serverRandom, ecdhParams);
-        byte[] signature = Dtls12Signer.Sign(serverCertificate, signatureAlgorithm, signedContent);
-        CryptographicOperations.ZeroMemory(signedContent);
-
         // Server hello flight (message_seq 1..N).
         List<OutboundHandshakeMessage> flight = new();
         ushort seq = 1;
@@ -136,6 +118,98 @@ internal static class Dtls12ServerHandshake
         flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHello, seq, serverHelloBody));
         transcript.Append(HandshakeType.ServerHello, seq, serverHelloBody);
         seq++;
+
+        EcdheKeyExchange? ecdhe = null;
+        try
+        {
+            if (suite.UsesCertificate)
+            {
+                ecdhe = BuildCertificateFlight(
+                    flight, transcript, ref seq, options, clientHello, serverRandom, suite);
+            }
+            else if (suite.KeyExchange == Dtls12KeyExchange.EcdhePsk)
+            {
+                ecdhe = BuildEcdhePskFlight(
+                    flight, transcript, ref seq, clientHello);
+            }
+
+            // Plain PSK sends no ServerKeyExchange (no identity hint, no ECDHE params).
+            bool requestClientCertificate = suite.UsesCertificate
+                && options.RequireClientCertificate;
+            if (requestClientCertificate)
+            {
+                byte[] requestBody = Dtls12CertificateRequest.Encode(
+                    new byte[]
+                    {
+                        Dtls12CertificateRequest.EcdsaSign,
+                        Dtls12CertificateRequest.RsaSign,
+                    },
+                    new ushort[] { 0x0403, 0x0503, 0x0401, 0x0501 });
+                flight.Add(new OutboundHandshakeMessage(
+                    HandshakeType.CertificateRequest, seq, requestBody));
+                transcript.Append(HandshakeType.CertificateRequest, seq, requestBody);
+                seq++;
+            }
+
+            byte[] doneBody = Array.Empty<byte>();
+            flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHelloDone, seq, doneBody));
+            transcript.Append(HandshakeType.ServerHelloDone, seq, doneBody);
+            ushort serverFinishedSeq = (ushort)(seq + 1);
+
+            recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
+                    transceiver, flight, recordSequence, cancellationToken)
+                .ConfigureAwait(false);
+
+            return await ReceiveClientFinishAndCompleteAsync(
+                    transceiver,
+                    options,
+                    suite,
+                    ecdhe,
+                    clientHello.Random,
+                    serverRandom,
+                    transcript,
+                    serverFinishedSeq,
+                    recordSequence,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            ecdhe?.Dispose();
+        }
+    }
+
+    // Appends the certificate-authenticated server flight messages (Certificate + signed
+    // ServerKeyExchange) and returns the server's ephemeral ECDHE key.
+    private static EcdheKeyExchange BuildCertificateFlight(
+        List<OutboundHandshakeMessage> flight,
+        Dtls12Transcript transcript,
+        ref ushort seq,
+        DtlsServerOptions options,
+        Dtls12ClientHello clientHello,
+        byte[] serverRandom,
+        Dtls12CipherSuite suite)
+    {
+        _ = suite;
+        X509Certificate2 serverCertificate = options.ServerCertificate!;
+        NamedGroup group = SelectGroup(clientHello);
+
+        EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
+        byte[] serverPoint = ecdhe.ExportKeyShare();
+        byte[] ecdhParams = Dtls12ServerKeyExchange.EncodeEcdhParams((ushort)group, serverPoint);
+
+        IReadOnlyList<ushort> clientAlgorithms = ParseClientSignatureAlgorithms(clientHello);
+        if (!Dtls12Signer.TrySelectAlgorithm(
+            serverCertificate, clientAlgorithms, out ushort signatureAlgorithm))
+        {
+            ecdhe.Dispose();
+            throw new DtlsException(
+                "No mutually supported signature algorithm for the server certificate.");
+        }
+
+        byte[] signedContent = Concat(clientHello.Random, serverRandom, ecdhParams);
+        byte[] signature = Dtls12Signer.Sign(serverCertificate, signatureAlgorithm, signedContent);
+        CryptographicOperations.ZeroMemory(signedContent);
 
         byte[] certificateBody = Dtls12Certificate.Encode(new[] { serverCertificate.RawData });
         flight.Add(new OutboundHandshakeMessage(HandshakeType.Certificate, seq, certificateBody));
@@ -148,52 +222,39 @@ internal static class Dtls12ServerHandshake
             HandshakeType.ServerKeyExchange, seq, serverKeyExchange));
         transcript.Append(HandshakeType.ServerKeyExchange, seq, serverKeyExchange);
         seq++;
+        return ecdhe;
+    }
 
-        bool requestClientCertificate = options.RequireClientCertificate;
-        if (requestClientCertificate)
-        {
-            byte[] requestBody = Dtls12CertificateRequest.Encode(
-                new byte[] { Dtls12CertificateRequest.EcdsaSign, Dtls12CertificateRequest.RsaSign },
-                new ushort[] { 0x0403, 0x0503, 0x0401, 0x0501 });
-            flight.Add(new OutboundHandshakeMessage(
-                HandshakeType.CertificateRequest, seq, requestBody));
-            transcript.Append(HandshakeType.CertificateRequest, seq, requestBody);
-            seq++;
-        }
+    // Appends the ECDHE_PSK ServerKeyExchange (empty identity hint + unsigned ECDHE params) and
+    // returns the server's ephemeral ECDHE key.
+    private static EcdheKeyExchange BuildEcdhePskFlight(
+        List<OutboundHandshakeMessage> flight,
+        Dtls12Transcript transcript,
+        ref ushort seq,
+        Dtls12ClientHello clientHello)
+    {
+        NamedGroup group = SelectGroup(clientHello);
+        EcdheKeyExchange ecdhe = EcdheKeyExchange.Create(group);
+        byte[] serverPoint = ecdhe.ExportKeyShare();
+        byte[] ecdhParams = Dtls12ServerKeyExchange.EncodeEcdhParams((ushort)group, serverPoint);
 
-        byte[] doneBody = Array.Empty<byte>();
-        flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHelloDone, seq, doneBody));
-        transcript.Append(HandshakeType.ServerHelloDone, seq, doneBody);
-        ushort serverFinishedSeq = (ushort)(seq + 1);
-
-        recordSequence = await Dtls12Flight.SendPlaintextFlightAsync(
-                transceiver, flight, recordSequence, cancellationToken)
-            .ConfigureAwait(false);
-
-        return await ReceiveClientFinishAndCompleteAsync(
-                transceiver,
-                options,
-                suite,
-                ecdhe,
-                clientHello.Random,
-                serverRandom,
-                transcript,
-                requestClientCertificate,
-                serverFinishedSeq,
-                recordSequence,
-                cancellationToken)
-            .ConfigureAwait(false);
+        byte[] serverKeyExchange = Dtls12PskServerKeyExchange.EncodeEcdhePsk(
+            Array.Empty<byte>(), ecdhParams);
+        flight.Add(new OutboundHandshakeMessage(
+            HandshakeType.ServerKeyExchange, seq, serverKeyExchange));
+        transcript.Append(HandshakeType.ServerKeyExchange, seq, serverKeyExchange);
+        seq++;
+        return ecdhe;
     }
 
     private static async Task<DtlsConnection> ReceiveClientFinishAndCompleteAsync(
         Dtls13FlightTransceiver transceiver,
         DtlsServerOptions options,
         Dtls12CipherSuite suite,
-        EcdheKeyExchange ecdhe,
+        EcdheKeyExchange? ecdhe,
         byte[] clientRandom,
         byte[] serverRandom,
         Dtls12Transcript transcript,
-        bool requestedClientCertificate,
         ushort serverFinishedSeq,
         ulong recordSequence,
         CancellationToken cancellationToken)
@@ -261,6 +322,7 @@ internal static class Dtls12ServerHandshake
                         DeriveKeys(
                             suite,
                             ecdhe,
+                            options.PskCallback,
                             body,
                             clientRandom,
                             serverRandom,
@@ -277,13 +339,16 @@ internal static class Dtls12ServerHandshake
                 }
             }
 
-            VerifyClientAuthentication(
-                clientCertificateRequired,
-                clientCertificate,
-                pendingCertVerifyAlgorithm,
-                pendingCertVerifySignature,
-                pendingCertVerifyContent,
-                options);
+            if (suite.UsesCertificate)
+            {
+                VerifyClientAuthentication(
+                    clientCertificateRequired,
+                    clientCertificate,
+                    pendingCertVerifyAlgorithm,
+                    pendingCertVerifySignature,
+                    pendingCertVerifyContent,
+                    options);
+            }
 
             byte[] expectedClient = Dtls12KeySchedule.VerifyData(
                 suite.PrfHash, masterSecret!, ClientFinishTranscriptHash(transcript),
@@ -376,7 +441,8 @@ internal static class Dtls12ServerHandshake
 
     private static void DeriveKeys(
         Dtls12CipherSuite suite,
-        EcdheKeyExchange ecdhe,
+        EcdheKeyExchange? ecdhe,
+        DtlsPskServerCallback? pskCallback,
         byte[] clientKeyExchangeBody,
         byte[] clientRandom,
         byte[] serverRandom,
@@ -385,12 +451,8 @@ internal static class Dtls12ServerHandshake
         ref Dtls12RecordProtector? sendProtector,
         ref Dtls12RecordProtector? receiveProtector)
     {
-        if (!Dtls12ClientKeyExchange.TryParseEcdhe(clientKeyExchangeBody, out byte[] clientPoint))
-        {
-            throw new DtlsException("Malformed DTLS 1.2 ClientKeyExchange.");
-        }
-
-        byte[] preMasterSecret = ecdhe.DeriveSharedSecret(clientPoint);
+        byte[] preMasterSecret = ResolvePreMasterSecret(
+            suite, ecdhe, pskCallback, clientKeyExchangeBody);
 
         // The extended_master_secret session_hash spans messages through ClientKeyExchange.
         byte[] sessionHash = transcript.CurrentHash();
@@ -405,6 +467,69 @@ internal static class Dtls12ServerHandshake
         receiveProtector = new Dtls12RecordProtector(
             suite, keyBlock.ClientWriteKey, keyBlock.ClientWriteSalt);
         keyBlock.Clear();
+    }
+
+    private static byte[] ResolvePreMasterSecret(
+        Dtls12CipherSuite suite,
+        EcdheKeyExchange? ecdhe,
+        DtlsPskServerCallback? pskCallback,
+        byte[] clientKeyExchangeBody)
+    {
+        if (suite.KeyExchange == Dtls12KeyExchange.EcdhePsk)
+        {
+            if (ecdhe is null
+                || !Dtls12ClientKeyExchange.TryParseEcdhePsk(
+                    clientKeyExchangeBody, out byte[] identity, out byte[] clientPoint))
+            {
+                throw new DtlsException("Malformed DTLS 1.2 ECDHE_PSK ClientKeyExchange.");
+            }
+
+            byte[] psk = ResolvePsk(pskCallback, identity);
+            byte[] ecdheSecret = ecdhe.DeriveSharedSecret(clientPoint);
+            byte[] pms = Dtls12KeySchedule.EcdhePskPreMasterSecret(ecdheSecret, psk);
+            CryptographicOperations.ZeroMemory(ecdheSecret);
+            CryptographicOperations.ZeroMemory(psk);
+            return pms;
+        }
+
+        if (suite.UsesPsk)
+        {
+            if (!Dtls12ClientKeyExchange.TryParsePsk(clientKeyExchangeBody, out byte[] identity))
+            {
+                throw new DtlsException("Malformed DTLS 1.2 PSK ClientKeyExchange.");
+            }
+
+            byte[] psk = ResolvePsk(pskCallback, identity);
+            byte[] pms = Dtls12KeySchedule.PlainPskPreMasterSecret(psk);
+            CryptographicOperations.ZeroMemory(psk);
+            return pms;
+        }
+
+        if (ecdhe is null
+            || !Dtls12ClientKeyExchange.TryParseEcdhe(clientKeyExchangeBody, out byte[] point))
+        {
+            throw new DtlsException("Malformed DTLS 1.2 ClientKeyExchange.");
+        }
+
+        return ecdhe.DeriveSharedSecret(point);
+    }
+
+    private static byte[] ResolvePsk(DtlsPskServerCallback? pskCallback, byte[] identity)
+    {
+        if (pskCallback is null)
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.HandshakeFailure, true, "The server has no PSK callback configured.");
+        }
+
+        ReadOnlyMemory<byte> key = pskCallback(identity);
+        if (key.IsEmpty)
+        {
+            throw new DtlsAlertException(
+                DtlsAlert.UnknownPskIdentity, true, "The PSK identity was not recognised.");
+        }
+
+        return key.ToArray();
     }
 
     private static byte[]? TryOpenFinished(
@@ -504,31 +629,43 @@ internal static class Dtls12ServerHandshake
 
     private static Dtls12CipherSuite SelectCipherSuite(
         Dtls12ClientHello clientHello,
-        X509Certificate2 serverCertificate)
+        DtlsServerOptions options)
     {
-        bool isEcdsa;
-        using (ECDsa? ecdsa = serverCertificate.GetECDsaPublicKey())
+        bool hasCertificate = options.ServerCertificate is not null;
+        bool hasPsk = options.PskCallback is not null;
+
+        bool isEcdsa = false;
+        if (hasCertificate)
         {
+            using ECDsa? ecdsa = options.ServerCertificate!.GetECDsaPublicKey();
             isEcdsa = ecdsa is not null;
         }
 
         foreach (ushort id in clientHello.CipherSuites)
         {
-            if (!Dtls12CipherSuite.TryGet(id, out Dtls12CipherSuite suite)
-                || !suite.UsesCertificate)
+            if (!Dtls12CipherSuite.TryGet(id, out Dtls12CipherSuite suite))
             {
                 continue;
             }
 
-            bool suiteEcdsa = suite.KeyExchange == Dtls12KeyExchange.EcdheEcdsa;
-            if (suiteEcdsa == isEcdsa)
+            if (suite.UsesCertificate && hasCertificate)
+            {
+                bool suiteEcdsa = suite.KeyExchange == Dtls12KeyExchange.EcdheEcdsa;
+                if (suiteEcdsa == isEcdsa)
+                {
+                    return suite;
+                }
+            }
+            else if (suite.UsesPsk && hasPsk)
             {
                 return suite;
             }
         }
 
-        throw new DtlsException(
-            "No mutually supported certificate cipher suite for the server certificate.");
+        throw new DtlsAlertException(
+            DtlsAlert.HandshakeFailure,
+            true,
+            "No mutually supported cipher suite for the server's credentials.");
     }
 
     private static NamedGroup SelectGroup(Dtls12ClientHello clientHello)
