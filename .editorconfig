@@ -119,6 +119,10 @@ dotnet_naming_rule.private_fields_underscore.severity = warning
 dotnet_diagnostic.IDE0011.severity = warning   # add braces
 dotnet_diagnostic.IDE0161.severity = warning   # file-scoped namespace
 
+# Require the MIT copyright file header on every C# file (IDE0073).
+file_header_template = Copyright (c) marcschier. All rights reserved.\nLicensed under the MIT License. See LICENSE in the project root for license information.
+dotnet_diagnostic.IDE0073.severity = warning   # require file header
+
 ##########################################
 # Security analyzers -> error
 ##########################################

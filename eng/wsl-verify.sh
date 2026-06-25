@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) marcschier. All rights reserved.
+# Licensed under the MIT License. See LICENSE in the project root for license information.
 # Linux build + test verification via WSL. Builds the solution and runs all test projects
 # using the WSL-local .NET SDK. Run from anywhere; resolves the repo root from this script.
 set -euo pipefail

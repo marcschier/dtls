@@ -1,4 +1,6 @@
 #!/usr/bin/env pwsh
+# Copyright (c) marcschier. All rights reserved.
+# Licensed under the MIT License. See LICENSE in the project root for license information.
 # Fails the build if any C# source line exceeds the configured column limit.
 # Runs on all platforms via `pwsh`. Tabs are expanded to 4 columns for measurement.
 

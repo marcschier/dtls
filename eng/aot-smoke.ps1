@@ -1,4 +1,6 @@
 #!/usr/bin/env pwsh
+# Copyright (c) marcschier. All rights reserved.
+# Licensed under the MIT License. See LICENSE in the project root for license information.
 # Smoke test for the NativeAOT-published samples. Until the DTLS handshake engine is
 # complete, this runs each sample's `--selftest` mode, which exercises the implemented
 # transport layer end to end and exits 0 on success. It validates that the library and
