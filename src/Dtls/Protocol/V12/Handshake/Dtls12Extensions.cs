@@ -32,6 +32,24 @@ internal static class Dtls12Extensions
     }
 
     /// <summary>
+    /// Encodes an empty renegotiation_info extension_data (RFC 5746): the
+    /// <c>renegotiated_connection&lt;0..255&gt;</c> vector is empty for an initial handshake, so
+    /// the extension_data is a single zero length byte. Sending it signals support for secure
+    /// renegotiation, which peers such as OpenSSL require.
+    /// </summary>
+    public static byte[] EncodeRenegotiationInfo()
+    {
+        return new byte[] { 0 };
+    }
+
+    /// <summary>
+    /// The TLS_EMPTY_RENEGOTIATION_INFO_SCSV signaling cipher suite (RFC 5746): a client may signal
+    /// secure-renegotiation support by including this value among its cipher suites instead of the
+    /// renegotiation_info extension.
+    /// </summary>
+    public const ushort RenegotiationInfoScsv = 0x00FF;
+
+    /// <summary>
     /// Encodes a signature_algorithms extension_data from a list of two-byte
     /// SignatureAndHashAlgorithm values.
     /// </summary>

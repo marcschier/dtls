@@ -111,6 +111,10 @@ internal static class Dtls12ServerHandshake
         bool clientOfferedEcPointFormats = Dtls12Extensions.Has(
             clientHello.Extensions, ExtensionType.EcPointFormats);
 
+        bool clientSignaledRenegotiationInfo =
+            Dtls12Extensions.Has(clientHello.Extensions, ExtensionType.RenegotiationInfo)
+            || ClientHasScsv(clientHello);
+
         Dtls12Transcript transcript = new(suite.PrfHash);
         transcript.Append(HandshakeType.ClientHello, 1, clientHelloBody);
 
@@ -120,7 +124,7 @@ internal static class Dtls12ServerHandshake
 
         byte[] serverHelloBody = BuildServerHello(
             serverRandom, suite.Id, useRawPublicKey, useExtendedMasterSecret,
-            clientOfferedEcPointFormats);
+            clientOfferedEcPointFormats, clientSignaledRenegotiationInfo);
         flight.Add(new OutboundHandshakeMessage(HandshakeType.ServerHello, seq, serverHelloBody));
         transcript.Append(HandshakeType.ServerHello, seq, serverHelloBody);
         seq++;
@@ -707,7 +711,8 @@ internal static class Dtls12ServerHandshake
         ushort cipherSuite,
         bool useRawPublicKey,
         bool useExtendedMasterSecret,
-        bool echoEcPointFormats)
+        bool echoEcPointFormats,
+        bool echoRenegotiationInfo)
     {
         // A server MUST only send extensions the client offered (RFC 5246 section 7.4.1.4).
         List<HandshakeExtension> extensions = new();
@@ -717,6 +722,13 @@ internal static class Dtls12ServerHandshake
             extensions.Add(new HandshakeExtension(
                 ExtensionType.ExtendedMasterSecret,
                 Dtls12Extensions.EncodeExtendedMasterSecret()));
+        }
+
+        if (echoRenegotiationInfo)
+        {
+            extensions.Add(new HandshakeExtension(
+                ExtensionType.RenegotiationInfo,
+                Dtls12Extensions.EncodeRenegotiationInfo()));
         }
 
         if (echoEcPointFormats)
@@ -739,6 +751,19 @@ internal static class Dtls12ServerHandshake
             Extensions = extensions,
         };
         return hello.Encode();
+    }
+
+    private static bool ClientHasScsv(Dtls12ClientHello clientHello)
+    {
+        foreach (ushort suite in clientHello.CipherSuites)
+        {
+            if (suite == Dtls12Extensions.RenegotiationInfoScsv)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool ClientOffersRawPublicKey(Dtls12ClientHello clientHello)

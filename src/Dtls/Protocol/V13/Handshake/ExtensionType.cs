@@ -41,4 +41,7 @@ internal enum ExtensionType : ushort
 
     /// <summary>connection_id (54, RFC 9146).</summary>
     ConnectionId = 54,
+
+    /// <summary>renegotiation_info (0xFF01, RFC 5746; DTLS 1.2 secure renegotiation).</summary>
+    RenegotiationInfo = 0xFF01,
 }

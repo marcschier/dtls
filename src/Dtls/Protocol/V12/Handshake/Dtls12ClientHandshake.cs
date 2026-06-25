@@ -699,6 +699,9 @@ internal static class Dtls12ClientHandshake
             new HandshakeExtension(
                 ExtensionType.ExtendedMasterSecret,
                 Dtls12Extensions.EncodeExtendedMasterSecret()),
+            new HandshakeExtension(
+                ExtensionType.RenegotiationInfo,
+                Dtls12Extensions.EncodeRenegotiationInfo()),
         };
 
         if (offerRawPublicKey)
