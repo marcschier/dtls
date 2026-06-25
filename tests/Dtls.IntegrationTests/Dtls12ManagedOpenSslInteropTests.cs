@@ -6,6 +6,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dtls.Protocol.V12.Handshake;
+using Dtls.Protocol.V13;
+using Dtls.Protocol.V13.Handshake;
 using Dtls.Transport;
 using Xunit;
 
@@ -200,16 +202,37 @@ public sealed class Dtls12ManagedOpenSslInteropTests
         }
     }
 
+    // Mirrors DtlsServer's initial-ClientHello reassembly: OpenSSL fragments its DTLS handshake
+    // messages, so the first ClientHello may span several datagrams and must be reassembled into a
+    // single plaintext record before the managed server engine consumes it.
     private static async Task<DtlsConnection> AcceptManagedAsync(
         InMemoryDatagramTransport transport,
         DtlsServerOptions options,
         CancellationToken cancellationToken)
     {
+        HandshakeReassembler reassembler =
+            new(options.MaxHandshakeMessageSize, firstSequence: 0);
         byte[] buffer = new byte[transport.MaxDatagramSize];
-        int received = await transport.ReceiveAsync(buffer, cancellationToken);
-        byte[] initialDatagram = buffer.AsSpan(0, received).ToArray();
-        return await Dtls12ServerHandshake.RunAsync(
-            transport, options, initialDatagram, cancellationToken);
+        while (true)
+        {
+            int received = await transport.ReceiveAsync(buffer, cancellationToken);
+            if (received == 0)
+            {
+                throw new DtlsException("The peer closed the transport before the ClientHello.");
+            }
+
+            Dtls13HandshakeFlight.OfferPlaintext(buffer.AsSpan(0, received), reassembler);
+            if (reassembler.TryReadNext(
+                out HandshakeType type, out byte[] body, out ushort sequence))
+            {
+                Assert.Equal(HandshakeType.ClientHello, type);
+                byte[] message = HandshakeMessage.Serialize(type, sequence, body);
+                byte[] initialDatagram = Dtls13PlaintextRecord.Encode(
+                    Dtls13PlaintextRecord.HandshakeContentType, 0, 0, message);
+                return await Dtls12ServerHandshake.RunAsync(
+                    transport, options, initialDatagram, cancellationToken);
+            }
+        }
     }
 
     private static async Task RunEchoAsync(
