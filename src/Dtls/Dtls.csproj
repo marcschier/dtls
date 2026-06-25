@@ -2,9 +2,18 @@
 
   <PropertyGroup>
     <TargetFrameworks>netstandard2.1;net8.0;net9.0;net10.0</TargetFrameworks>
+    <!-- Mobile target frameworks are opt-in (they require the android/ios workloads, and iOS
+         requires a macOS build host); the CI mobile-build job sets IncludeMobileTargets=true. The
+         library runs on iOS/Android through the managed DTLS 1.2 engine, which is the universal
+         fallback where no native DTLS backend exists. Android and iOS are also separately
+         toggleable so Android can be built on a non-macOS host. -->
+    <TargetFrameworks Condition="'$(IncludeMobileTargets)' == 'true' or '$(IncludeAndroidTarget)' == 'true'">$(TargetFrameworks);net10.0-android</TargetFrameworks>
+    <TargetFrameworks Condition="'$(IncludeMobileTargets)' == 'true' or '$(IncludeIosTarget)' == 'true'">$(TargetFrameworks);net10.0-ios</TargetFrameworks>
     <RootNamespace>Dtls</RootNamespace>
     <AssemblyName>Dtls</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <SupportedOSPlatformVersion Condition="$(TargetFramework.EndsWith('-ios'))">13.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="$(TargetFramework.EndsWith('-android'))">26.0</SupportedOSPlatformVersion>
 
     <!-- Packaging -->
     <PackageId>Dtls</PackageId>
