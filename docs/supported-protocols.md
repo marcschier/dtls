@@ -14,7 +14,7 @@ OpenSSL, Schannel, and Apple Secure Transport / Network.framework do not current
 
 For DTLS 1.2, the native operating-system stack is preferred on Linux, Windows, and macOS. On platforms where no native DTLS backend is available (for example Android and iOS), a fully managed DTLS 1.2 engine — implemented in C# on the same BCL primitives as the DTLS 1.3 engine — is used as the universal fallback. The public `DtlsClient`/`DtlsServer` API selects the managed DTLS 1.2 engine automatically when `NativeDtlsBackend.ForCurrentPlatform()` returns no backend.
 
-The library targets `netstandard2.1`, `net8.0`, `net9.0`, and `net10.0`, and additionally builds the mobile target frameworks `net10.0-android` and `net10.0-ios` (validated build-only in CI). On iOS the BCL AES-CCM primitive is unavailable, so the AES-CCM cipher suites are compiled out there (AES-GCM remains the default AEAD); Android retains the full suite set. Both mobile platforms run DTLS through the managed DTLS 1.2 engine and the managed DTLS 1.3 engine.
+The library targets `netstandard2.0`, `netstandard2.1`, `net8.0`, `net9.0`, and `net10.0`, and additionally builds the mobile target frameworks `net10.0-android` and `net10.0-ios` (validated build-only in CI). On iOS the BCL AES-CCM primitive is unavailable, so the AES-CCM cipher suites are compiled out there (AES-GCM remains the default AEAD); Android retains the full suite set. Both mobile platforms run DTLS through the managed DTLS 1.2 engine and the managed DTLS 1.3 engine. `netstandard2.0` is a compile/API-compatibility target only (for .NET Framework 4.6.1+, Unity, Mono): its BCL has no managed AEAD or `ECDiffieHellman`, so the wire codecs, value types, and datagram transports run but the handshake throws `PlatformNotSupportedException` (see the cipher-suite note below).
 
 ### Version negotiation and DTLS 1.2 downgrade
 
@@ -67,7 +67,9 @@ RFC 8446 appendix B.4), in this default preference order:
 
 The AES-CCM suites require the BCL `System.Security.Cryptography.AesCcm` primitive, which is
 unavailable on `netstandard2.1`; they are only negotiable on .NET 8 or later. On
-`netstandard2.1` only the two AES-GCM suites are supported.
+`netstandard2.1` only the two AES-GCM suites are supported. On `netstandard2.0` the BCL has no
+`AesGcm`/`AesCcm` (nor `ECDiffieHellman`) at all, so no suite is negotiable and the handshake
+throws `PlatformNotSupportedException`; that target exists for compile/API compatibility only.
 
 `TLS_CHACHA20_POLY1305_SHA256` (0x1303) is intentionally **not** negotiated for DTLS 1.3.
 DTLS 1.3 mandates record sequence-number encryption (RFC 9147 section 4.2.3), which for the

@@ -6,6 +6,10 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+#if NETSTANDARD2_0
+using System.Buffers;
+using System.Runtime.InteropServices;
+#endif
 
 namespace Dtls.Transport;
 
@@ -81,8 +85,14 @@ public sealed class UdpDatagramTransport : IDatagramTransport
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+#if NETSTANDARD2_0
+        cancellationToken.ThrowIfCancellationRequested();
+        ArraySegment<byte> segment = AsArraySegment(datagram);
+        await _socket.SendAsync(segment, SocketFlags.None).ConfigureAwait(false);
+#else
         await _socket.SendAsync(datagram, SocketFlags.None, cancellationToken)
             .ConfigureAwait(false);
+#endif
     }
 
     /// <inheritdoc />
@@ -91,8 +101,30 @@ public sealed class UdpDatagramTransport : IDatagramTransport
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+#if NETSTANDARD2_0
+        cancellationToken.ThrowIfCancellationRequested();
+        if (MemoryMarshal.TryGetArray((ReadOnlyMemory<byte>)buffer, out ArraySegment<byte> backing))
+        {
+            return await _socket.ReceiveAsync(backing, SocketFlags.None).ConfigureAwait(false);
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(buffer.Length);
+        try
+        {
+            int received = await _socket
+                .ReceiveAsync(new ArraySegment<byte>(rented, 0, buffer.Length), SocketFlags.None)
+                .ConfigureAwait(false);
+            rented.AsSpan(0, received).CopyTo(buffer.Span);
+            return received;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+#else
         return await _socket.ReceiveAsync(buffer, SocketFlags.None, cancellationToken)
             .ConfigureAwait(false);
+#endif
     }
 
     /// <inheritdoc />
@@ -116,4 +148,16 @@ public sealed class UdpDatagramTransport : IDatagramTransport
             throw new ObjectDisposedException(nameof(UdpDatagramTransport));
         }
     }
+
+#if NETSTANDARD2_0
+    private static ArraySegment<byte> AsArraySegment(ReadOnlyMemory<byte> memory)
+    {
+        if (MemoryMarshal.TryGetArray(memory, out ArraySegment<byte> segment))
+        {
+            return segment;
+        }
+
+        return new ArraySegment<byte>(memory.ToArray());
+    }
+#endif
 }

@@ -55,7 +55,7 @@ internal static class Dtls12ClientHandshake
             : Dtls12CipherSuite.DefaultIdsFor(certificate: true, ecdhePsk: false, plainPsk: false);
 
         byte[] clientRandom = new byte[Dtls12ClientHello.RandomLength];
-        RandomNumberGenerator.Fill(clientRandom);
+        SecureRandom.Fill(clientRandom);
 
         Dtls13FlightTransceiver transceiver = new(
             transport, options.HandshakeRetransmissionTimeout, options.MaxHandshakeRetransmissions);

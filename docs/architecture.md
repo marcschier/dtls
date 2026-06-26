@@ -6,7 +6,7 @@ Dtls is a cross-platform DTLS library for .NET that supports DTLS 1.0, DTLS 1.2,
 
 The library is designed to provide client and server roles, a modern allocation-conscious API based on `Span<T>`, `ReadOnlySpan<T>`, `Memory<T>`, and `ReadOnlyMemory<T>`, and a datagram/message-oriented programming model that matches DTLS rather than exposing a stream abstraction.
 
-The target frameworks are `netstandard2.1`, `net8.0`, `net9.0`, and `net10.0`; the `net10.0` target is intended to be NativeAOT-compatible.
+The target frameworks are `netstandard2.0`, `netstandard2.1`, `net8.0`, `net9.0`, and `net10.0`; the `net10.0` target is intended to be NativeAOT-compatible. `netstandard2.0` is a compile/API-compatibility target (for .NET Framework 4.6.1+, Unity, and Mono): it relies on polyfill packages (`System.Memory`, `System.Threading.Tasks.Extensions`, `Microsoft.Bcl.HashCode`) plus small internal `CryptographicOperations` and secure-random shims, and because that BCL ships no `AesGcm`/`AesCcm`/`ECDiffieHellman`, the cryptographic handshake throws `PlatformNotSupportedException` while the wire codecs, value types, and transports still run.
 
 The repository layout is intentionally simple: `src/` contains the library, `tests/` contains automated tests, `samples/` contains runnable examples, and `docs/` contains design and usage documentation.
 

@@ -95,7 +95,7 @@ internal readonly struct Dtls13CipherSuite : IEquatable<Dtls13CipherSuite>
     /// <summary>
     /// The cipher suites supported on the current target framework, in secure default
     /// preference order. AES-CCM (0x1304, 0x1305) is only present on .NET 8 or later, where
-    /// the BCL <see cref="System.Security.Cryptography.AesCcm"/> primitive exists.
+    /// the BCL <c>AesCcm</c> primitive exists.
     /// </summary>
     public static IReadOnlyList<Dtls13CipherSuite> SupportedDefault { get; } =
         BuildSupportedDefault();

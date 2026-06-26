@@ -10,7 +10,7 @@ namespace Dtls.Crypto;
 /// <summary>
 /// An ephemeral ECDHE key exchange over the NIST P-curves (secp256r1/secp384r1/secp521r1)
 /// for the DTLS 1.3 / TLS 1.3 key_share extension (RFC 8446 section 4.2.8). It wraps the
-/// BCL <see cref="ECDiffieHellman"/>, exporting and importing TLS uncompressed-point
+/// BCL <c>ECDiffieHellman</c>, exporting and importing TLS uncompressed-point
 /// key shares (<c>0x04 || X || Y</c>) and computing the raw shared secret (the X
 /// coordinate of the shared point, big-endian, padded to the curve's coordinate length).
 /// </summary>
@@ -18,9 +18,58 @@ namespace Dtls.Crypto;
 /// The shared-secret computation uses <c>ECDiffieHellman.DeriveRawSecretAgreement</c>, which
 /// is available only on .NET 7 and later. On netstandard2.1 the managed handshake cannot
 /// run, so <see cref="DeriveSharedSecret"/> throws <see cref="PlatformNotSupportedException"/>;
-/// the record layer and wire codecs still compile and run on netstandard2.1. X25519 is not
-/// exposed by the BCL across the supported targets, so only the NIST P-curves are offered.
+/// on netstandard2.0 the <c>ECDiffieHellman</c> primitive is absent entirely, so every
+/// operation throws. The record layer and wire codecs still compile and run on both. X25519 is
+/// not exposed by the BCL across the supported targets, so only the NIST P-curves are offered.
 /// </remarks>
+#if NETSTANDARD2_0
+internal sealed class EcdheKeyExchange : IDisposable
+{
+    // The throwing stub members intentionally mirror the real instance API even though they
+    // touch no instance state (no instance is ever created: Create throws).
+#pragma warning disable CA1822 // Mark members as static
+#pragma warning disable CA1065 // Do not raise exceptions in unexpected locations
+    private const string Ns20Message =
+        "Managed ECDHE requires .NET 7 or later; netstandard2.0 has no ECDiffieHellman primitive.";
+
+    /// <summary>Whether <paramref name="group"/> is a supported NIST P-curve.</summary>
+    public static bool IsSupported(NamedGroup group) =>
+        group is NamedGroup.Secp256r1 or NamedGroup.Secp384r1 or NamedGroup.Secp521r1;
+
+    /// <summary>Not supported on netstandard2.0 (no <c>ECDiffieHellman</c> primitive).</summary>
+    public static EcdheKeyExchange Create(NamedGroup group)
+    {
+        _ = group;
+        throw new PlatformNotSupportedException(Ns20Message);
+    }
+
+    /// <summary>The named group of this key exchange.</summary>
+    public NamedGroup Group => throw new PlatformNotSupportedException(Ns20Message);
+
+    /// <summary>The curve coordinate length, in bytes.</summary>
+    public int CoordinateLength => throw new PlatformNotSupportedException(Ns20Message);
+
+    /// <summary>The exported key_share length, in bytes.</summary>
+    public int KeyShareLength => throw new PlatformNotSupportedException(Ns20Message);
+
+    /// <summary>Not supported on netstandard2.0 (no <c>ECDiffieHellman</c> primitive).</summary>
+    public byte[] ExportKeyShare() => throw new PlatformNotSupportedException(Ns20Message);
+
+    /// <summary>Not supported on netstandard2.0 (no <c>ECDiffieHellman</c> primitive).</summary>
+    public byte[] DeriveSharedSecret(ReadOnlySpan<byte> peerKeyShare)
+    {
+        _ = peerKeyShare.Length;
+        throw new PlatformNotSupportedException(Ns20Message);
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+    }
+#pragma warning restore CA1065
+#pragma warning restore CA1822
+}
+#else
 internal sealed class EcdheKeyExchange : IDisposable
 {
     private readonly ECDiffieHellman _ecdh;
@@ -176,3 +225,4 @@ internal sealed class EcdheKeyExchange : IDisposable
         _disposed = true;
     }
 }
+#endif

@@ -98,7 +98,7 @@ internal static class Dtls13ClientHandshake
         {
             byte[] keyShare = ecdhe.ExportKeyShare();
             byte[] random = new byte[ClientHello.RandomLength];
-            RandomNumberGenerator.Fill(random);
+            SecureRandom.Fill(random);
 
             byte[] early = Dtls13KeySchedule.EarlySecret(hash, pskKey);
             byte[] binderKey = Dtls13KeySchedule.DeriveExternalBinderKey(hash, early);
@@ -239,7 +239,7 @@ internal static class Dtls13ClientHandshake
         {
             byte[] keyShare = ecdhe.ExportKeyShare();
             byte[] random = new byte[ClientHello.RandomLength];
-            RandomNumberGenerator.Fill(random);
+            SecureRandom.Fill(random);
 
             byte[] clientConnectionId = NewConnectionId(options);
             byte[] clientHello1Body = BuildCertificateClientHelloBody(
@@ -1151,7 +1151,7 @@ internal static class Dtls13ClientHandshake
         }
 
         byte[] cid = new byte[8];
-        RandomNumberGenerator.Fill(cid);
+        SecureRandom.Fill(cid);
         return cid;
     }
 

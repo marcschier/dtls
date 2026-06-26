@@ -25,7 +25,7 @@ Delegating the legacy CBC-era 1.0/1.2 handshakes to hardened native stacks avoid
 - Native DTLS **1.2** backends — **Schannel** (Windows), **OpenSSL** (Linux), and **Network.framework** (macOS) — preferred where present; the deprecated **Secure Transport** stack provides a DTLS **1.0** fallback on macOS.
 - AEAD cipher suites: **AES-128-GCM** and **AES-256-GCM** (all TFMs), plus **AES-128-CCM** and **AES-128-CCM-8** (net8+; unavailable on iOS, where AES-GCM remains the default). Selectable via `DtlsOptions.CipherSuites`. (ChaCha20-Poly1305 is not offered: the BCL has no raw ChaCha20 for DTLS 1.3 sequence-number encryption.)
 - Modern, allocation-conscious **`Span<T>`** API; transport-agnostic with a built-in UDP `Socket` adapter and an in-memory loopback transport.
-- Targets **netstandard2.1, net8.0, net9.0, net10.0** (plus opt-in **`net10.0-android`** / **`net10.0-ios`**); **NativeAOT-compatible** on net10.
+- Targets **netstandard2.0, netstandard2.1, net8.0, net9.0, net10.0** (plus opt-in **`net10.0-android`** / **`net10.0-ios`**); **NativeAOT-compatible** on net10. `netstandard2.0` (for .NET Framework 4.6.1+, Unity, Mono) is a **compile/API-compatibility** target — its wire codecs, value types, and datagram transports run, but because that BCL has no `AesGcm`/`ECDiffieHellman`, the cryptographic handshake throws `PlatformNotSupportedException`; a working handshake needs netstandard2.1 (AES-GCM) or net8.0+.
 
 ## 📚 Documentation
 

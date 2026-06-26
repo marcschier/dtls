@@ -1,7 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.1;net8.0;net9.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;netstandard2.1;net8.0;net9.0;net10.0</TargetFrameworks>
     <!-- Mobile target frameworks are opt-in (they require the android/ios workloads, and iOS
          requires a macOS build host); the CI mobile-build job sets IncludeMobileTargets=true. The
          library runs on iOS/Android through the managed DTLS 1.2 engine, which is the universal
@@ -46,6 +46,17 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Dtls.UnitTests" />
     <InternalsVisibleTo Include="Dtls.IntegrationTests" />
+  </ItemGroup>
+
+  <!-- netstandard2.0 is a compile/API-compatible target: the wire codecs, value types, options,
+       and transports run, but the cryptographic handshake throws PlatformNotSupportedException
+       (managed AEAD/ECDHE require net8.0+). These polyfills supply Span/Memory, ValueTask, and
+       HashCode, which netstandard2.0 does not ship. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" />
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" />
+    <PackageReference Include="Microsoft.Bcl.HashCode" />
   </ItemGroup>
 
 </Project>
