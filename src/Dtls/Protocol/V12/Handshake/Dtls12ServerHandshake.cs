@@ -105,7 +105,7 @@ internal static class Dtls12ServerHandshake
             clientHello.Extensions, ExtensionType.ExtendedMasterSecret);
 
         byte[] serverRandom = new byte[Dtls12ClientHello.RandomLength];
-        RandomNumberGenerator.Fill(serverRandom);
+        SecureRandom.Fill(serverRandom);
 
         bool useRawPublicKey = suite.UsesCertificate
             && options.AllowRawPublicKeys
@@ -813,7 +813,7 @@ internal static class Dtls12ServerHandshake
     private static byte[] CreateCookieSecret()
     {
         byte[] secret = new byte[32];
-        RandomNumberGenerator.Fill(secret);
+        SecureRandom.Fill(secret);
         return secret;
     }
 }

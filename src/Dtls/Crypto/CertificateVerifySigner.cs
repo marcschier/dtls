@@ -201,7 +201,12 @@ internal static class CertificateVerifySigner
                 return false;
             }
 
+#if NETSTANDARD2_0
+            return rsa.VerifyData(
+                content, signature.ToArray(), hashAlgorithm, RSASignaturePadding.Pss);
+#else
             return rsa.VerifyData(content, signature, hashAlgorithm, RSASignaturePadding.Pss);
+#endif
         }
         finally
         {

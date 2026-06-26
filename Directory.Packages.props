@@ -17,12 +17,22 @@
     <PackageVersion Include="Nerdbank.GitVersioning" Version="3.10.85" />
   </ItemGroup>
 
+  <!-- netstandard2.0 polyfills (referenced only by the library's ns2.0 target). They backfill
+       Span/Memory/BinaryPrimitives, ValueTask, and HashCode, which netstandard2.0 lacks. -->
+  <ItemGroup>
+    <PackageVersion Include="System.Memory" Version="4.6.3" />
+    <PackageVersion Include="System.Runtime.CompilerServices.Unsafe" Version="6.1.2" />
+    <PackageVersion Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
+    <PackageVersion Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
+  </ItemGroup>
+
   <!-- Test dependencies. -->
   <ItemGroup>
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
   </ItemGroup>
 
 </Project>

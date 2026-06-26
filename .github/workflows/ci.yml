@@ -69,6 +69,26 @@ jobs:
       - name: Interop tests (vs OpenSSL)
         run: dotnet test tests/Dtls.Interop.Tests/Dtls.Interop.Tests.csproj -c Release --no-build
 
+  netfx-smoke:
+    name: .NET Framework smoke (net48)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - name: Restore
+        run: dotnet restore tests/Dtls.NetFxSmokeTests/Dtls.NetFxSmokeTests.csproj
+      - name: Build (netstandard2.0 library consumed by net48)
+        run: dotnet build tests/Dtls.NetFxSmokeTests/Dtls.NetFxSmokeTests.csproj -c Release --no-restore
+      - name: Test (net48 on .NET Framework)
+        run: dotnet test tests/Dtls.NetFxSmokeTests/Dtls.NetFxSmokeTests.csproj -c Release --no-build
+
   mobile-build:
     name: Mobile build (android, ios)
     runs-on: macos-latest

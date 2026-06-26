@@ -189,7 +189,7 @@ internal static class Dtls13ServerHandshake
         NamedGroup expectedGroup = changeGroup ? retryGroup : group;
 
         byte[] macKey = new byte[32];
-        RandomNumberGenerator.Fill(macKey);
+        SecureRandom.Fill(macKey);
         try
         {
             byte[] cookie = HelloRetryCookie.Build(macKey, expectedGroup, clientHello1Hash);
@@ -343,7 +343,7 @@ internal static class Dtls13ServerHandshake
         }
 
         byte[] serverCid = new byte[8];
-        RandomNumberGenerator.Fill(serverCid);
+        SecureRandom.Fill(serverCid);
         return (serverCid, clientCid);
     }
 
@@ -1113,7 +1113,7 @@ internal static class Dtls13ServerHandshake
         byte[] serverConnectionId)
     {
         byte[] random = new byte[ServerHello.RandomLength];
-        RandomNumberGenerator.Fill(random);
+        SecureRandom.Fill(random);
 
         List<HandshakeExtension> extensions = new()
         {
@@ -1146,7 +1146,7 @@ internal static class Dtls13ServerHandshake
         byte[] serverConnectionId)
     {
         byte[] random = new byte[ServerHello.RandomLength];
-        RandomNumberGenerator.Fill(random);
+        SecureRandom.Fill(random);
 
         List<HandshakeExtension> extensions = new()
         {
