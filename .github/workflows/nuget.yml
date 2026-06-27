@@ -1,19 +1,27 @@
 name: nuget
 
-# Manually publishes the most recently published DtlsSharp package from the repository's GitHub
-# Packages feed to nuget.org using NuGet trusted publishing (OIDC short-lived token — no stored
-# API key). Run from the Actions tab once a version has been published to GitHub Packages by the
-# tag-triggered CI job.
+# Manually mirrors a DtlsSharp package version from the repository's GitHub Packages feed to
+# nuget.org using NuGet trusted publishing (OIDC short-lived token — no stored API key). By
+# default it mirrors the highest stable version on the feed; an explicit version can be supplied
+# as a workflow input. Run from the Actions tab once a version has been published to GitHub
+# Packages by the tag-triggered CI job.
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Exact DtlsSharp version to mirror to nuget.org. Leave blank to mirror the highest
+          stable (non-prerelease) version on the GitHub Packages feed.
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    name: Publish latest to nuget.org
+    name: Publish to nuget.org
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -26,9 +34,10 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Download latest DtlsSharp package from GitHub Packages
+      - name: Resolve and download the DtlsSharp package from GitHub Packages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
           id=dtlssharp
@@ -38,11 +47,22 @@ jobs:
             | jq -r '.resources[] | select(."@type"=="PackageBaseAddress/3.0.0") | ."@id"' \
             | head -n1)
           base=${base%/}
-          latest=$(curl -fsSL -H "$auth" "$base/$id/index.json" | jq -r '.versions | last')
-          echo "Latest published $id version: $latest"
+          # Pick the explicit input if given, otherwise the highest stable (non-prerelease)
+          # version on the feed. The feed does not guarantee a sorted "versions" array, so sort
+          # numerically instead of taking the last element.
+          version="${VERSION_INPUT:-}"
+          if [ -z "$version" ]; then
+            version=$(curl -fsSL -H "$auth" "$base/$id/index.json" \
+              | jq -r '[.versions[] | select(test("-") | not)] | sort_by(split(".") | map(tonumber)) | last // ""')
+          fi
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::No stable $id version found on the GitHub Packages feed." >&2
+            exit 1
+          fi
+          echo "Mirroring $id version: $version"
           mkdir -p ./download
-          curl -fsSL -H "$auth" "$base/$id/$latest/$id.$latest.nupkg" \
-            -o "./download/$id.$latest.nupkg"
+          curl -fsSL -H "$auth" "$base/$id/$version/$id.$version.nupkg" \
+            -o "./download/$id.$version.nupkg"
           ls -l ./download
 
       - name: NuGet login (OIDC trusted publishing)
