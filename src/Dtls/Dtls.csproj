@@ -33,6 +33,12 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
+  <!-- Strong-name the shipping assembly with the committed repository key. -->
+  <PropertyGroup>
+  <SignAssembly>true</SignAssembly>
+  <AssemblyOriginatorKeyFile>$(StrongNameKeyPath)</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+
   <!-- The BCL AES-CCM primitive is unavailable on Apple mobile platforms; the CCM cipher suites
        are compiled out there (AES-GCM remains available). -->
   <PropertyGroup Condition="$(TargetFramework.EndsWith('-ios')) or $(TargetFramework.EndsWith('-maccatalyst')) or $(TargetFramework.EndsWith('-tvos'))">
@@ -44,8 +50,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="Dtls.UnitTests" />
-    <InternalsVisibleTo Include="Dtls.IntegrationTests" />
+    <InternalsVisibleTo Include="Dtls.UnitTests" Key="$(DtlsPublicKey)" />
+    <InternalsVisibleTo Include="Dtls.IntegrationTests" Key="$(DtlsPublicKey)" />
   </ItemGroup>
 
   <!-- netstandard2.0 is a compile/API-compatible target: the wire codecs, value types, options,

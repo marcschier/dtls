@@ -23,6 +23,18 @@
     <PathMap Condition="'$(CI)' == 'true'">$(MSBuildThisFileDirectory)=/_/</PathMap>
   </PropertyGroup>
 
+  <!-- Strong naming. The shipping library and its friend test assemblies are signed with a
+       committed key: a strong-name key is an identity, not a secret, so committing it keeps
+       builds reproducible and requires no CI/secret wiring. DtlsPublicKey is the full public
+       key of eng/Dtls.snk (token 3f0c2131dbeee25d); the library's InternalsVisibleTo
+       declarations reference it so the signed friend test assemblies retain internals access.
+       SignAssembly itself is opted in per-project (the shipping library and those two friends);
+       samples and the public-API-only test projects stay unsigned. -->
+  <PropertyGroup>
+    <StrongNameKeyPath>$(MSBuildThisFileDirectory)eng\Dtls.snk</StrongNameKeyPath>
+    <DtlsPublicKey>00240000048000001401000006020000002400005253413100080000010001002D1FE4A36D37223DC657AB998BC3343526FD923745227AA80388F6A43AA9DEC14CBF80F11DF949A3F89BAD45DC6D8A3C90BBCC40EB013D962076222762F3273C503C7DCAE2F6AF05976B621B9E48369BC2491553B1A5E3A65B7394A01935E0BF547648CA6EB9719DB73796BB73FE8AA6D454CCB455C15994E7B38FD144B3B1DA08FA89060F4A01B9521533E8C1D69434B2A0EFC3483792F9BE315EBFD201AB040C15DD4D1DC9EC6BBE376D4CB5303D2823BD524B18A1399C83C1B9676541C13E93A13AFDE28806E002B86915A118E30BF718A149135AA502029D10FB632E4597C748E7F1F0734E38114667CF62C11C33568663E6CA99B0E32FC8F14F52EDE6E6</DtlsPublicKey>
+  </PropertyGroup>
+
   <!-- Security-conscious analyzers shared by all projects. -->
   <ItemGroup>
     <PackageReference Include="Roslynator.Analyzers" PrivateAssets="all" />
