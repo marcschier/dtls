@@ -64,6 +64,14 @@ Tests that need a specific OS no-op elsewhere, so the suite is green on every pl
 
 This is a security-protocol implementation; see [`docs/security.md`](docs/security.md) for the threat model and hardening notes. DTLS 1.0 is deprecated (RFC 8996) and is **off by default**.
 
+## Release notes
+
+### 1.1.1
+
+Updates build, analyzer, and test dependencies, the .NET 10 SDK, and CI/release Actions
+to current stable versions. Runtime dependencies, target-framework support, and test
+behavior are unchanged.
+
 ## License
 
 [MIT](LICENSE).
