@@ -66,7 +66,7 @@ This is a security-protocol implementation; see [`docs/security.md`](docs/securi
 
 ## Release notes
 
-### 1.1.1
+### 1.1.2
 
 Updates build, analyzer, and test dependencies, the .NET 10 SDK, and CI/release Actions
 to current stable versions. Runtime dependencies, target-framework support, and test
