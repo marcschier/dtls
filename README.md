@@ -66,6 +66,12 @@ This is a security-protocol implementation; see [`docs/security.md`](docs/securi
 
 ## Release notes
 
+### 1.1.3
+
+Updates the .NET 10 SDK and test dependencies to current stable versions, and updates
+the `setup-dotnet` GitHub Action used by CI and package publishing. Runtime dependencies,
+target-framework support, and test behavior are unchanged.
+
 ### 1.1.2
 
 Updates build, analyzer, and test dependencies, the .NET 10 SDK, and CI/release Actions
